@@ -25,6 +25,9 @@ static bool orbit_methods_valid(const orbit_service_config *config) {
             cmeta_type_require_traits(
                 method->request_type,
                 CMETA_TRAIT_TRIVIAL_COPY | CMETA_TRAIT_TRIVIAL_DESTROY) != CMETA_OK ||
+            (method->flags & ~ORBIT_METHOD_FLAGS_MASK) != 0u ||
+            (method->flags == ORBIT_METHOD_CALL_TOKEN &&
+             !cmeta_type_equal(method->request_type, &cmeta_type_uint64)) ||
             (i != 0u && config->methods[i-1u].id >= method->id))
             return false;
 
@@ -138,6 +141,9 @@ cflow_actor_send_status orbit_service_ref_try_send(
         const size_t middle = first + (last - first) / 2u;
         const orbit_service_method *entry = &ref->methods[middle];
         if (entry->id == method) {
+            /* Reserved call-token events cannot enter via generic send. */
+            if ((entry->flags & ORBIT_METHOD_CALL_TOKEN) != 0u)
+                return CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
             const cflow_event_view event = {
                 entry->event_id,
                 entry->request_type,
