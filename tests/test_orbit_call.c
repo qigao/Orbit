@@ -23,6 +23,7 @@ typedef struct call_probe {
     orbit_call_port *port;
     atomic_int calls;
     atomic_int action_executions;
+    atomic_int business_executions;
     atomic_int skipped_cancelled;
     atomic_int observed;
     atomic_int done;
@@ -60,24 +61,52 @@ static bool call_action(void *user, const void *state, const void *event,
                         const char **out_error) {
     call_fixture *fixture = (call_fixture *)user;
     const uint64_t token = *(const uint64_t *)event;
-    uint64_t request = 0u;
-    orbit_call_status status;
 
     if (fixture == NULL || state == NULL || event == NULL ||
         out_state == NULL || out_observation == NULL || out_error == NULL)
         return false;
 
+    /*
+     * CFlow Machine Actions REQUIRE DETERMINISTIC | NO_ALIAS. Therefore
+     * this action never reads the mutable call port, executes business code,
+     * or stages a reply before the CFlow state transition has committed.
+     *
+     * An optional test-only barrier changes WHEN this pure action completes,
+     * never its output or effects.
+     */
+    atomic_fetch_add(&fixture->probe.action_executions, 1);
+    if (atomic_load(&fixture->probe.block_action)) {
+        size_t checks = 0u;
+        atomic_store(&fixture->probe.action_entered, true);
+        while (!atomic_load(&fixture->probe.release_action) && checks++ < 5000u)
+            cmeta_sleep_ms(1u);
+        CHECK(atomic_load(&fixture->probe.release_action));
+    }
+    *(int *)out_state = *(const int *)state + 1;
+    *(uint64_t *)out_observation = token;
+    *out_error = NULL;
+    return true;
+}
+
+static bool call_observe(void *user, const cmeta_type_desc *type,
+                         const void *value) {
+    call_fixture *fixture = (call_fixture *)user;
+    orbit_call_status status;
+    uint64_t request = 0u;
+    const uint64_t token = *(const uint64_t *)value;
+
+    CHECK(fixture != NULL);
+    CHECK(value != NULL);
+    CHECK(cmeta_type_equal(type, &cmeta_type_uint64));
+
+    /*
+     * This CFlow Subscriber is invoked AFTER the Machine transition commit.
+     * Dispatching here is deliberately separate from the deterministic
+     * Machine Action; it may produce application side effects and errors.
+     */
     status = orbit_call_u64_request(&fixture->calls, token, 10u, &request);
     if (status == ORBIT_CALL_OK) {
-        /* This handler is executed by the REAL CFlow Machine/Actor owner. */
-        atomic_fetch_add(&fixture->probe.action_executions, 1);
-        if (atomic_load(&fixture->probe.block_action)) {
-            size_t checks = 0u;
-            atomic_store(&fixture->probe.action_entered, true);
-            while (!atomic_load(&fixture->probe.release_action) && checks++ < 5000u)
-                cmeta_sleep_ms(1u);
-            CHECK(atomic_load(&fixture->probe.release_action));
-        }
+        atomic_fetch_add(&fixture->probe.business_executions, 1);
         if (request != 12345u) {
             status = orbit_call_u64_stage_reply(
                 &fixture->calls, token, 10u,
@@ -88,25 +117,7 @@ static bool call_action(void *user, const void *state, const void *event,
         CHECK(status == ORBIT_CALL_STALE);
         atomic_fetch_add(&fixture->probe.skipped_cancelled, 1);
     }
-    /* State and observation are constructed by this existing CFlow action;
-     * the observation is visible only AFTER the Machine commits its state.
-     */
-    *(int *)out_state = *(const int *)state +
-        (status == ORBIT_CALL_OK ? 1 : 0);
-    *(uint64_t *)out_observation = token;
-    *out_error = NULL;
-    return true;
-}
-
-static bool call_observe(void *user, const cmeta_type_desc *type,
-                         const void *value) {
-    call_fixture *fixture = (call_fixture *)user;
-    orbit_call_status status;
-    CHECK(fixture != NULL);
-    CHECK(value != NULL);
-    CHECK(cmeta_type_equal(type, &cmeta_type_uint64));
-    status = orbit_call_u64_observe(
-        &fixture->calls, *(const uint64_t *)value);
+    status = orbit_call_u64_observe(&fixture->calls, token);
     CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
     atomic_fetch_add(&fixture->probe.observed, 1);
     return true;
@@ -178,8 +189,8 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
     };
     const cflow_machine_action actions[] = {
         {300u, &cmeta_type_int, 100u, &cmeta_type_uint64,
-         &cmeta_type_int, CMETA_EFFECT_STATEFUL | CMETA_EFFECT_MAY_FAIL,
-         CMETA_PROP_NO_ALIAS,
+         &cmeta_type_int, CMETA_EFFECT_PURE,
+         CMETA_PROP_DETERMINISTIC | CMETA_PROP_NO_ALIAS,
          CFLOW_MACHINE_ACTION_VALUE, &cmeta_type_uint64, 0u}
     };
     const cflow_machine_transition transitions[] = {
@@ -286,6 +297,7 @@ static void test_mailbox_rejection_and_postcommit(void) {
     CHECK(atomic_load(&f.probe.callback_count) == 1);
     CHECK(atomic_load(&f.probe.latest_response) == 42u);
     CHECK(atomic_load(&f.probe.action_executions) == 1);
+    CHECK(atomic_load(&f.probe.business_executions) == 1);
     CHECK(orbit_call_u64_observe(&f.calls, token) == ORBIT_CALL_STALE);
     CHECK(orbit_call_u64_stage_reply(&f.calls, token, 10u, 0, 10u) ==
           ORBIT_CALL_STALE);
@@ -434,6 +446,7 @@ static void test_cancel_during_real_actor_action(void) {
     CHECK(atomic_load(&f.probe.action_executions) == 1);
 
     fixture_drive_until(&f, &f.probe.observed, 1);
+    CHECK(atomic_load(&f.probe.business_executions) == 0);
     CHECK(atomic_load(&f.probe.callback_count) == 1);
     CHECK(atomic_load(&f.probe.successes) == 0);
     CHECK(orbit_call_u64_stage_reply(&f.calls, token, 10u, 0, 72u) ==
