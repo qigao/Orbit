@@ -132,10 +132,10 @@ static void fixture_prepare(service_fixture *fixture) {
         service_observe, service_on_error, service_on_done, &fixture->probe
     };
     fixture->methods[0] = (orbit_service_method){
-        10u, 100u, &cmeta_type_int
+        10u, 100u, &cmeta_type_int, ORBIT_METHOD_SEND
     };
     fixture->methods[1] = (orbit_service_method){
-        20u, 101u, &cmeta_type_int
+        20u, 101u, &cmeta_type_int, ORBIT_METHOD_SEND
     };
     fixture->service_config = (orbit_service_config){
         &fixture->actor_config, fixture->methods, 2u
@@ -163,7 +163,7 @@ int main(void) {
     /* Fail before touching runtime: no guessed type / method ABI. */
     {
         orbit_service_config bad = fixture.service_config;
-        orbit_service_method wrong = {10u, 100u, &cmeta_type_bool};
+        orbit_service_method wrong = {10u, 100u, &cmeta_type_bool, ORBIT_METHOD_SEND};
         bad.methods = &wrong;
         spawn_result = orbit_service_spawn(&fixture.service, &bad);
         CHECK(spawn_result.status == ORBIT_SERVICE_INVALID_METHOD);
@@ -180,8 +180,8 @@ int main(void) {
     {
         orbit_service_config bad = fixture.service_config;
         orbit_service_method ambiguous[2] = {
-            {10u, 100u, &cmeta_type_int},
-            {20u, 100u, &cmeta_type_int}
+            {10u, 100u, &cmeta_type_int, ORBIT_METHOD_SEND},
+            {20u, 100u, &cmeta_type_int, ORBIT_METHOD_SEND}
         };
         bad.methods = ambiguous;
         spawn_result = orbit_service_spawn(&fixture.service, &bad);
@@ -191,10 +191,22 @@ int main(void) {
     {
         orbit_service_config bad = fixture.service_config;
         orbit_service_method unsorted[2] = {
-            {20u, 101u, &cmeta_type_int},
-            {10u, 100u, &cmeta_type_int}
+            {20u, 101u, &cmeta_type_int, ORBIT_METHOD_SEND},
+            {10u, 100u, &cmeta_type_int, ORBIT_METHOD_SEND}
         };
         bad.methods = unsorted;
+        spawn_result = orbit_service_spawn(&fixture.service, &bad);
+        CHECK(spawn_result.status == ORBIT_SERVICE_INVALID_METHOD);
+    }
+
+    /* CALL_TOKEN is an explicit uint64-only kind, not a magic Event cast. */
+    {
+        orbit_service_config bad = fixture.service_config;
+        orbit_service_method invalid_kind[2] = {
+            {10u, 100u, &cmeta_type_int, ORBIT_METHOD_CALL_TOKEN},
+            {20u, 101u, &cmeta_type_int, ORBIT_METHOD_SEND}
+        };
+        bad.methods = invalid_kind;
         spawn_result = orbit_service_spawn(&fixture.service, &bad);
         CHECK(spawn_result.status == ORBIT_SERVICE_INVALID_METHOD);
     }
