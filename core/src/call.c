@@ -12,7 +12,13 @@
 typedef enum orbit_call_slot_state {
     ORBIT_SLOT_FREE = 0,
     ORBIT_SLOT_ADMITTING,
-    ORBIT_SLOT_ACTIVE
+    ORBIT_SLOT_ACTIVE,
+    /*
+     * Terminal claimed but callback still executing outside port mutex.
+     * Holds the response credit until callback returns; otherwise repeated
+     * callbacks can accumulate without respect to configured capacity.
+     */
+    ORBIT_SLOT_COMPLETING
 } orbit_call_slot_state;
 
 typedef struct orbit_call_slot {
@@ -85,7 +91,9 @@ static orbit_call_slot *orbit_call_lookup_locked(
         (size_t)(one_based - 1u) >= impl->capacity)
         return NULL;
     slot = &impl->slots[one_based - 1u];
-    if (slot->generation != generation || slot->state == ORBIT_SLOT_FREE)
+    if (slot->generation != generation ||
+        slot->state == ORBIT_SLOT_FREE ||
+        slot->state == ORBIT_SLOT_COMPLETING)
         return NULL;
     return slot;
 }
@@ -105,7 +113,8 @@ static void orbit_call_terminal_locked(
             terminal == ORBIT_CALL_TERMINAL_APPLICATION_ERROR
         ? slot->response : 0u;
 
-    slot->state = ORBIT_SLOT_FREE;
+    /* The slot cannot be reused while its callback is outstanding. */
+    slot->state = ORBIT_SLOT_COMPLETING;
     slot->cancel_requested = false;
     slot->staged = false;
     slot->observed = false;
@@ -132,14 +141,33 @@ static void orbit_call_terminal_locked(
     }
 }
 
-/* Never call application code while holding the port mutex. */
+/*
+ * Never call application code while holding the port mutex. Retain this
+ * exact slot's response credit during the entire callback (COMPLETING).
+ * A callback may re-enter get_stats/cancel/close; its token is already
+ * terminal and no new call may reuse the slot until this function returns.
+ */
 static void orbit_call_deliver(orbit_call_impl *impl,
                                const orbit_call_delivery *delivery) {
-    if (delivery->callback == NULL) return;
-    delivery->callback(delivery->user, delivery->token,
-                       delivery->terminal, delivery->application_status,
-                       delivery->response);
+    orbit_call_slot *slot;
+    uint32_t one_based;
+    uint32_t generation;
+    if (delivery->token == 0u) return;
+    if (delivery->callback != NULL) {
+        delivery->callback(delivery->user, delivery->token,
+                           delivery->terminal, delivery->application_status,
+                           delivery->response);
+    }
+    one_based = (uint32_t)delivery->token;
+    generation = (uint32_t)(delivery->token >> 32);
     cmeta_mutex_lock(&impl->mutex);
+    if (one_based == 0u || (size_t)(one_based - 1u) >= impl->capacity)
+        abort(); /* Internal invariant, never a caller-controlled path. */
+    slot = &impl->slots[one_based - 1u];
+    if (slot->state != ORBIT_SLOT_COMPLETING ||
+        slot->generation != generation || impl->callbacks_inflight == 0u)
+        abort();
+    slot->state = ORBIT_SLOT_FREE;
     --impl->callbacks_inflight;
     cmeta_mutex_unlock(&impl->mutex);
 }
@@ -452,7 +480,7 @@ orbit_call_status orbit_call_port_close(
                 break;
             }
         }
-        if (delivery.callback == NULL) break;
+        if (delivery.token == 0u) break;
         cmeta_mutex_unlock(&impl->mutex);
         orbit_call_deliver(impl, &delivery);
         cmeta_mutex_lock(&impl->mutex);
