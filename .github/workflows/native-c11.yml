@@ -1,0 +1,146 @@
+name: Orbit native C11 Service contract
+
+on:
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "cmake/**"
+      - "core/**"
+      - "ace/**"
+      - "tests/**"
+      - ".github/workflows/native-c11.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Only the newest exact HEAD of one PR executes. No superseded FIFO runners.
+concurrency:
+  group: orbit-native-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-c11:
+    name: Real CFlow / ServiceHost SDK · Ubuntu 24.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Checkout exact Orbit source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Checkout immutable SaltsCore 0.1 source owner
+        uses: actions/checkout@v4
+        with:
+          repository: qigao/salts-core
+          ref: 012fa1a5effc956ba764509034b3c265d9b9aa79
+          path: _deps/salts-core
+          persist-credentials: false
+
+      - name: Checkout immutable Salts 3.0 CMeta ACE CFlow source owner
+        uses: actions/checkout@v4
+        with:
+          repository: qigao/salts
+          ref: efbfa23e7a22e9e59c32abde987c06cc6e8e44f3
+          path: _deps/salts
+          persist-credentials: false
+
+      - name: Verify exact source HEAD identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          test "$(git -C _deps/salts-core rev-parse HEAD)" = 012fa1a5effc956ba764509034b3c265d9b9aa79
+          test "$(git -C _deps/salts rev-parse HEAD)" = efbfa23e7a22e9e59c32abde987c06cc6e8e44f3
+          echo "ORBIT_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git log -1 --format='%H %s'
+
+      - name: Install checksum-verified ccache and restore compilation cache
+        uses: qigao/stun/.github/actions/setup-ccache@4688683111b38dae5c2d814482b955dfc2e7d0a3
+        with:
+          profile: orbit-m0-real-native-sdk
+          source_sha: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Build/install exact SaltsCore 0.1 native shared owners
+        shell: bash
+        run: |
+          set -euo pipefail
+          core="$RUNNER_TEMP/saltscore-0.1"
+          cmake -S _deps/salts-core -B _build/core -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF \
+            "-DCMAKE_INSTALL_PREFIX=$core"
+          cmake --build _build/core --parallel 2
+          cmake --install _build/core
+          test -f "$core/lib/cmake/SaltsCore/SaltsCoreConfig.cmake"
+          test -f "$core/lib/cmake/SaltsCore/SaltsCoreTargets.cmake"
+
+      - name: Build/install exact Salts 3.0 CMeta ACE CFlow owners
+        shell: bash
+        run: |
+          set -euo pipefail
+          core="$RUNNER_TEMP/saltscore-0.1"
+          salts="$RUNNER_TEMP/salts-3.0"
+          cmake -S _deps/salts -B _build/salts -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF -DBUILD_TESTS=OFF \
+            -DBUILD_SHARED_LIBS=OFF -DBUILD_BENCHMARKS=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            "-DCMAKE_PREFIX_PATH=$core" \
+            "-DCMAKE_INSTALL_PREFIX=$salts"
+          cmake --build _build/salts --parallel 2
+          cmake --install _build/salts
+          test -f "$salts/lib/cmake/Salts/SaltsConfig.cmake"
+          test -f "$salts/lib/cmake/Salts/SaltsTargets.cmake"
+
+      - name: Build and execute Orbit real native CTests — Debug and Release
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="$RUNNER_TEMP/salts-3.0;$RUNNER_TEMP/saltscore-0.1"
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/saltscore-0.1/lib:${LD_LIBRARY_PATH:-}"
+          for mode in Debug Release; do
+            cmake -S . -B "_build/orbit-$mode" -G Ninja \
+              "-DCMAKE_BUILD_TYPE=$mode" \
+              "-DCMAKE_PREFIX_PATH=$sdk" \
+              -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=ON
+            cmake --build "_build/orbit-$mode" --parallel 2
+            ctest --test-dir "_build/orbit-$mode" -N | grep -q '^Total Tests: 3$'
+            ctest --test-dir "_build/orbit-$mode" \
+              --no-tests=error --output-on-failure --timeout 120
+          done
+
+      - name: Confirm opt-out standalone Core has no mandatory ACE target
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="$RUNNER_TEMP/salts-3.0;$RUNNER_TEMP/saltscore-0.1"
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/saltscore-0.1/lib:${LD_LIBRARY_PATH:-}"
+          cmake -S . -B _build/orbit-core-only -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            "-DCMAKE_PREFIX_PATH=$sdk" \
+            -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=OFF
+          cmake --build _build/orbit-core-only --parallel 2
+          ctest --test-dir _build/orbit-core-only -N | grep -q '^Total Tests: 2$'
+          ctest --test-dir _build/orbit-core-only \
+            --no-tests=error --output-on-failure --timeout 120
+
+      - name: Report compiler cache statistics
+        if: always()
+        shell: bash
+        run: |
+          if command -v ccache >/dev/null 2>&1; then ccache --show-stats; fi
+
+      - name: Retain actual native CTest diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: orbit-native-c11-${{ github.run_id }}
+          path: |
+            _build/orbit-Debug/Testing/Temporary/LastTest.log
+            _build/orbit-Release/Testing/Temporary/LastTest.log
+            _build/orbit-core-only/Testing/Temporary/LastTest.log
+          if-no-files-found: warn
+          retention-days: 7
