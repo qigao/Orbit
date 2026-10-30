@@ -28,6 +28,15 @@ static bool orbit_methods_valid(const orbit_service_config *config) {
             (i != 0u && config->methods[i-1u].id >= method->id))
             return false;
 
+        /*
+         * One service method must select exactly one distinct Machine Event.
+         * Aliasing two method IDs to one Event silently loses method identity
+         * when CFlow dispatches; reject it during activation.
+         */
+        for (j = 0u; j < i; ++j)
+            if (config->methods[j].event_id == method->event_id)
+                return false;
+
         for (j = 0u; j < cflow_machine_event_count(machine); ++j) {
             const cflow_event_type *declared = cflow_machine_event_at(machine, j);
             if (declared != NULL && declared->id == method->event_id &&
