@@ -219,8 +219,9 @@ cflow_actor_send_status orbit_service_ref_try_send(
     const void *request) {
     size_t first;
     size_t last;
-    if (ref == NULL || ref->actor.impl == NULL || ref->methods == NULL ||
-        ref->method_count == 0u || method == 0u || request == NULL)
+    if (ref == NULL || ref->actor.impl == NULL || ref->catalog == NULL ||
+        ref->methods == NULL || ref->method_count == 0u ||
+        method == 0u || request == NULL)
         return CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
 
     first = 0u;
