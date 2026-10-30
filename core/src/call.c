@@ -469,18 +469,24 @@ orbit_call_status orbit_call_port_close(
         impl->close_reason = reason;
     }
     ++impl->closing_calls;
-    for (;;) {
+    /*
+     * Each slot is scanned exactly once: O(capacity) rather than repeatedly
+     * searching from slot zero after every callback (O(capacity^2)).
+     * New admissions are already sealed by closed=true. An ADMITTING slot
+     * is settled by its submitting thread after CFlow returns; a concurrent
+     * cancel/observe/close may also consume an ACTIVE slot before this scan.
+     *
+     * Releasing the mutex to invoke a callback does not permit reuse:
+     * COMPLETING retains that exact credit until the callback returns.
+     */
+    for (index = 0u; index < impl->capacity; ++index) {
+        orbit_call_slot *slot = &impl->slots[index];
         delivery = (orbit_call_delivery){0};
-        for (index = 0u; index < impl->capacity; ++index) {
-            orbit_call_slot *slot = &impl->slots[index];
-            if (slot->state == ORBIT_SLOT_ACTIVE) {
-                const uint64_t token = orbit_call_token(index, slot->generation);
-                orbit_call_terminal_locked(
-                    impl, slot, token, impl->close_reason, &delivery);
-                break;
-            }
-        }
-        if (delivery.token == 0u) break;
+        if (slot->state != ORBIT_SLOT_ACTIVE)
+            continue;
+        orbit_call_terminal_locked(
+            impl, slot, orbit_call_token(index, slot->generation),
+            impl->close_reason, &delivery);
         cmeta_mutex_unlock(&impl->mutex);
         orbit_call_deliver(impl, &delivery);
         cmeta_mutex_lock(&impl->mutex);
