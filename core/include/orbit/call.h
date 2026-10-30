@@ -30,10 +30,11 @@ extern "C" {
  *      exactly one local terminal result.
  *
  * A staged reply without a committed observation is NEVER a successful
- * terminal. Cancel and stop race with
- * observation through one lock and each admitted call has at most one local
- * callback, including cancellation and failed local work. No retry, worker,
- * transport, scheduler, timer, or second Actor is created.
+ * terminal. Cancel and stop race with observation through one lock, and
+ * every admitted call has exactly one local terminal when observed,
+ * cancelled or closed. The preallocated credit stays in COMPLETING state
+ * until its callback returns. No retry, worker, transport, scheduler,
+ * timer, or second Actor is created.
  *
  * These API names and only-u64 request/reply types are intentionally a small
  * native contract slice, NOT the finished general/IDL-generated Service API.
@@ -66,7 +67,8 @@ typedef enum orbit_call_terminal {
 } orbit_call_terminal;
 
 /*
- * Terminal callbacks run OUTSIDE the call-port lock, and may run on the
+ * Terminal callbacks run OUTSIDE the call-port lock, with their preallocated
+ * call credit held until return (no premature slot reuse), and may run on the
  * CFlow observation owner (success) or on the cancel/close caller (failure).
  * The token and scalar result are copied values. The callback may race with
  * call_async returning; callback user/provider lifetime must cover the entire
@@ -94,9 +96,11 @@ typedef struct orbit_call_port_stats {
 /*
  * Exactly capacity bounded slots, one Salts Platform mutex and no data-path
  * allocations. capacity is in [1, UINT32_MAX]; token generation never wraps.
- * Port borrows one address-stable, already-spawned Orbit Service owner;
- * it rejects other Service producer refs and MUST outlive that owner's
- * cflow_actor_destroy. port must be zero-initialized; do not copy or move it.
+ * Port retains one upstream cflow_actor_ref to PIN the Actor control block
+ * identity, and borrows the immutable method table and address-stable,
+ * already-spawned Orbit Service owner. The port rejects references with
+ * another Actor or method catalog and MUST outlive that owner's
+ * cflow_actor_destroy. Zero-initialize the port; never copy/move it.
  */
 orbit_call_status orbit_call_port_init(
     orbit_call_port *port, const orbit_service *owner, size_t capacity);
@@ -110,8 +114,11 @@ orbit_call_status orbit_call_port_init(
  * receive no callback. Every accepted call receives exactly one local
  * terminal callback when it is observed, cancelled or closed.
  *
- * This API requires the named method's Event type == cmeta_type_uint64 and
- * the Service's method catalog + CFlow producer ref to remain borrowed-live.
+ * The method must be declared ORBIT_METHOD_CALL_TOKEN with CMeta uint64
+ * Event payload. Generic orbit_service_ref_try_send rejects this reserved
+ * Event kind. The Service method catalog and CFlow producer ref must remain
+ * borrowed-live for the whole submission. This is not an authorization
+ * boundary for a caller already holding a raw native cflow_actor_ref.
  * No async call is admitted if the pool has no free slot/credit.
  */
 orbit_call_status orbit_call_u64_async(
