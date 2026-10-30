@@ -31,10 +31,23 @@ extern "C" {
  */
 typedef uint64_t orbit_method_id;
 
+/*
+ * Request Event admission kind. A CALL_TOKEN event is reserved exclusively
+ * for the trusted unary call-port -> CFlow bridge, not ordinary async send.
+ * The method table is a compile-time/catalog trust boundary, NOT a security
+ * sandbox for callers already holding a raw cflow_actor_ref.
+ */
+enum {
+    ORBIT_METHOD_SEND = 0u,
+    ORBIT_METHOD_CALL_TOKEN = UINT32_C(1) << 0,
+    ORBIT_METHOD_FLAGS_MASK = ORBIT_METHOD_CALL_TOKEN
+};
+
 typedef struct orbit_service_method {
     orbit_method_id id;                    /* nonzero, ascending, unique */
     cflow_event_id event_id;               /* existing Machine Event ID */
     const cmeta_type_desc *request_type;   /* exact trivially-copyable Event */
+    uint32_t flags;                        /* explicit admission kind */
 } orbit_service_method;
 
 typedef struct orbit_service_config {
@@ -94,7 +107,9 @@ void orbit_service_ref_release(orbit_service_ref *ref);
  * and forwards the payload to cflow_actor_ref_try_send(). No allocations,
  * retries, reflection lookup, hidden queue, or network operations occur.
  *
- * Invalid/unknown method or NULL payload returns SEND_INVALID_ARGUMENT.
+ * Invalid/unknown/CALL_TOKEN method or NULL payload returns SEND_INVALID_ARGUMENT.
+ * CALL_TOKEN methods may be sent only through Orbit::Call's reserved
+ * generation-checked token admission, never this generic send function.
  * FULL leaves the input untouched. STOPPING/STOPPED/FAILED/STALE are the
  * exact upstream statuses.
  */
