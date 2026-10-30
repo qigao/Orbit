@@ -20,7 +20,8 @@ The new `Orbit::Core` `orbit/call.h` + `core/src/call.c` provide a **bounded res
 
 ```c
 orbit_call_port calls = {0};
-orbit_call_port_init(&calls, 16u);
+/* After spawning a real Orbit Service owner: */
+orbit_call_port_init(&calls, &service, 16u);
 
 uint64_t token = 0u;
 cflow_actor_send_status send;
@@ -50,13 +51,15 @@ This is a **u64/u64 experimental first slice**. It is not a generic CMeta type s
 ## Correctness and ownership
 
 - The token is `(generation << 32) | (index + 1)`, and an older generation never matches a reused slot.
+- The port records an immutable CFlow Actor identity at construction. It refuses a different Service producer reference, while no hot-path read races the owner's mutable `actor.impl`. `try_destroy` returns BUSY until the original Actor owner has actually been destroyed.
 - Request/reply are plain inline u64. No pointer, callback-scoped CSerde view or nontrivial resource crosses the Actor mailbox.
 - Producer/ref/method table must remain valid through `orbit_call_u64_async`. Plugin-owned callbacks and descriptors must remain leased through **Actor and port terminal/quiescence**, **not just until local callback fires**. The current M0a reference is borrowed; full ServiceHost generation pinning is still open.
 - Terminal callbacks are invoked outside the mutex. Their thread is whichever CFlow observation or cancel/close caller wins. A callback can be delivered **before `call_async` returns** when a worker finishes rapidly; consumers must synchronize callback outputs.
 - Cancelling a call does not undo an already committed CFlow Machine transition or a business handler already running in the post-commit observer. Successful RPC/DB COMMIT is a different, stronger fact and is **not claimed**.
 - An actor that fails/stops before emitting an observation must explicitly call `orbit_call_port_close` on on_error/on_done; otherwise no terminal is justified. An application must never free the port before the Actor and all completion/producer callers quiesce.
 - The port mutex uses `Salts::Platform`; the CFlow Executor and Scheduler still belong to `Salts::CFlow`. No global mutable registry, hidden progress thread or additional mailbox exists.
-- `orbit_call_port_try_destroy()` is nonblocking, returns BUSY while submitting/closing/callback credits remain, and requires an already quiesced/destroyed owning Actor as an explicit precondition. This is not a magic cancellation or stream-owner wait.
+- This M0b post-commit business adapter requires a **single serialized CFlow Subscriber/Actor execution owner**, as in the native owner-affine test configuration. A generic worker Scheduler that can invoke observers on unrelated threads is not automatically an Actor state owner; broader execution-policy admission is still pending.
+- `orbit_call_port_try_destroy()` is nonblocking, returns BUSY while the bound Actor is not destroyed or while submitting/closing/callback credits remain, and requires quiescence of all external API users as an explicit precondition. This is not a magic cancellation or stream-owner wait.
 
 ## Existing native conformance source
 
