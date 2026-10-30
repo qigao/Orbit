@@ -20,6 +20,7 @@
 } while (0)
 
 typedef struct call_probe {
+    orbit_call_port *port;
     atomic_int calls;
     atomic_int action_executions;
     atomic_int skipped_cancelled;
@@ -134,6 +135,15 @@ static void call_terminal(void *user, uint64_t token,
     atomic_store(&probe->latest_token, token);
     atomic_store(&probe->latest_response, response);
     atomic_fetch_add(&probe->callback_count, 1);
+    /* The callback can re-enter the port because it is NOT called
+     * underneath its mutex. Its own token has already been retired.
+     */
+    if (probe->port != NULL) {
+        orbit_call_port_stats stats = {0};
+        CHECK(orbit_call_u64_cancel(probe->port, token) == ORBIT_CALL_STALE);
+        CHECK(orbit_call_port_get_stats(probe->port, &stats));
+        CHECK(stats.callbacks_inflight >= 1u);
+    }
     switch (outcome) {
         case ORBIT_CALL_TERMINAL_SUCCESS:
             CHECK(application_status == 0);
@@ -180,6 +190,7 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
         actions, 1u, transitions, 1u
     };
     memset(fixture, 0, sizeof(*fixture));
+    fixture->probe.port = &fixture->calls;
     atomic_init(&fixture->probe.block_action, false);
     atomic_init(&fixture->probe.action_entered, false);
     atomic_init(&fixture->probe.release_action, false);
