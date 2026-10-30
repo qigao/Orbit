@@ -21,6 +21,7 @@ typedef struct orbit_call_slot {
     bool cancel_requested;
     bool staged;
     bool observed;
+    orbit_method_id method;
     uint64_t request;
     uint64_t response;
     int application_status;
@@ -97,6 +98,7 @@ static void orbit_call_terminal_locked(
     slot->cancel_requested = false;
     slot->staged = false;
     slot->observed = false;
+    slot->method = 0u;
     slot->request = 0u;
     slot->response = 0u;
     slot->application_status = 0;
@@ -229,6 +231,7 @@ orbit_call_status orbit_call_u64_async(
     slot->cancel_requested = false;
     slot->staged = false;
     slot->observed = false;
+    slot->method = method;
     slot->request = request;
     slot->response = 0u;
     slot->application_status = 0;
@@ -246,6 +249,7 @@ orbit_call_status orbit_call_u64_async(
     /* This slot is still ADMITTING: close/cancel may only mark it pending. */
     if (!accepted) {
         slot->state = ORBIT_SLOT_FREE;
+        slot->method = 0u;
         slot->request = 0u;
         slot->callback = NULL;
         slot->callback_user = NULL;
@@ -278,10 +282,12 @@ orbit_call_status orbit_call_u64_async(
 }
 
 orbit_call_status orbit_call_u64_request(
-    orbit_call_port *port, uint64_t token, uint64_t *out_request) {
+    orbit_call_port *port, uint64_t token,
+    orbit_method_id expected_method, uint64_t *out_request) {
     orbit_call_impl *impl = orbit_call_live(port);
     orbit_call_slot *slot;
-    if (impl == NULL || out_request == NULL || token == 0u)
+    if (impl == NULL || out_request == NULL || token == 0u ||
+        expected_method == 0u)
         return ORBIT_CALL_INVALID_ARGUMENT;
     cmeta_mutex_lock(&impl->mutex);
     slot = orbit_call_lookup_locked(impl, token);
@@ -289,22 +295,31 @@ orbit_call_status orbit_call_u64_request(
         cmeta_mutex_unlock(&impl->mutex);
         return ORBIT_CALL_STALE;
     }
+    if (slot->method != expected_method) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_TYPE_MISMATCH;
+    }
     *out_request = slot->request;
     cmeta_mutex_unlock(&impl->mutex);
     return ORBIT_CALL_OK;
 }
 
 orbit_call_status orbit_call_u64_stage_reply(
-    orbit_call_port *port, uint64_t token,
+    orbit_call_port *port, uint64_t token, orbit_method_id expected_method,
     int application_status, uint64_t response) {
     orbit_call_impl *impl = orbit_call_live(port);
     orbit_call_slot *slot;
-    if (impl == NULL || token == 0u) return ORBIT_CALL_INVALID_ARGUMENT;
+    if (impl == NULL || token == 0u || expected_method == 0u)
+        return ORBIT_CALL_INVALID_ARGUMENT;
     cmeta_mutex_lock(&impl->mutex);
     slot = orbit_call_lookup_locked(impl, token);
     if (slot == NULL || impl->closed || slot->cancel_requested) {
         cmeta_mutex_unlock(&impl->mutex);
         return ORBIT_CALL_STALE;
+    }
+    if (slot->method != expected_method) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_TYPE_MISMATCH;
     }
     if (slot->staged || slot->observed) {
         cmeta_mutex_unlock(&impl->mutex);
