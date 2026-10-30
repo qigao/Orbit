@@ -5,11 +5,20 @@
 #include <cflow/scheduler.h>
 #include <cmeta/cmeta.h>
 
-#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+
+/* Assertions must run in Release as well as Debug (no NDEBUG bypass). */
+#define CHECK(expression) do { \
+    if (!(expression)) { \
+        fprintf(stderr, "%s:%d: failed: %s\\n", __FILE__, __LINE__, #expression); \
+        abort(); \
+    } \
+} while (0)
 
 /* This is a genuine CFlow Machine/Actor test, NOT a mocked actor or poller. */
 typedef struct service_probe {
@@ -96,11 +105,11 @@ static void fixture_prepare(service_fixture *fixture) {
     atomic_init(&fixture->probe.errors, 0);
     atomic_init(&fixture->probe.last, -1);
 
-    assert(cflow_machine_build(&fixture->machine, &definition) == CFLOW_MACHINE_OK);
+    CHECK(cflow_machine_build(&fixture->machine, &definition) == CFLOW_MACHINE_OK);
     /* Same single CFlow owner for Machine work and Subscription work. */
-    assert(cflow_executor_owner_init_with_capacity(
+    CHECK(cflow_executor_owner_init_with_capacity(
         &fixture->executor, 64u, NULL, NULL));
-    assert(cflow_scheduler_owner_bind(&fixture->scheduler,
+    CHECK(cflow_scheduler_owner_bind(&fixture->scheduler,
                                       &fixture->executor, 32u));
 
     fixture->action_binding = (cflow_machine_action_binding){
@@ -146,66 +155,68 @@ int main(void) {
         orbit_service_method wrong = {10u, 100u, &cmeta_type_bool};
         bad.methods = &wrong;
         spawn_result = orbit_service_spawn(&fixture.service, &bad);
-        assert(spawn_result.status == ORBIT_SERVICE_INVALID_METHOD);
-        assert(fixture.service.actor.impl == NULL);
+        CHECK(spawn_result.status == ORBIT_SERVICE_INVALID_METHOD);
+        CHECK(fixture.service.actor.impl == NULL);
     }
     {
         orbit_service_config bad = fixture.service_config;
         bad.method_count = 0u;
         spawn_result = orbit_service_spawn(&fixture.service, &bad);
-        assert(spawn_result.status == ORBIT_SERVICE_INVALID_METHOD);
+        CHECK(spawn_result.status == ORBIT_SERVICE_INVALID_METHOD);
     }
 
     spawn_result = orbit_service_spawn(&fixture.service,
                                       &fixture.service_config);
-    assert(spawn_result.status == ORBIT_SERVICE_OK);
-    assert(spawn_result.actor_status == CFLOW_ACTOR_OK);
-    assert(orbit_service_ref_acquire(&fixture.service, &ref));
-    assert(orbit_service_ref_retain(&ref, &retained));
+    CHECK(spawn_result.status == ORBIT_SERVICE_OK);
+    CHECK(spawn_result.actor_status == CFLOW_ACTOR_OK);
+    CHECK(orbit_service_ref_acquire(&fixture.service, &ref));
+    CHECK(orbit_service_ref_retain(&ref, &retained));
 
-    assert(orbit_service_ref_try_send(&ref, 0u, &input) ==
+    CHECK(orbit_service_ref_try_send(&ref, 0u, &input) ==
            CFLOW_ACTOR_SEND_INVALID_ARGUMENT);
-    assert(orbit_service_ref_try_send(&ref, 999u, &input) ==
+    CHECK(orbit_service_ref_try_send(&ref, 999u, &input) ==
            CFLOW_ACTOR_SEND_INVALID_ARGUMENT);
-    assert(orbit_service_ref_try_send(&ref, 10u, NULL) ==
+    CHECK(orbit_service_ref_try_send(&ref, 10u, NULL) ==
            CFLOW_ACTOR_SEND_INVALID_ARGUMENT);
 
     /* Mailbox capacity is one. Nothing is driven yet, so FULL is exact. */
-    assert(orbit_service_ref_try_send(&ref, 10u, &input) ==
+    CHECK(orbit_service_ref_try_send(&ref, 10u, &input) ==
            CFLOW_ACTOR_SEND_ACCEPTED);
-    assert(orbit_service_ref_try_send(&ref, 10u, &input) ==
+    CHECK(orbit_service_ref_try_send(&ref, 10u, &input) ==
            CFLOW_ACTOR_SEND_FULL);
-    assert(input == 42);
+    CHECK(input == 42);
 
     while (atomic_load(&fixture.probe.observed) == 0 && attempts++ < 512u)
         (void)cflow_executor_run_one(&fixture.executor);
-    assert(atomic_load(&fixture.probe.observed) == 1);
-    assert(atomic_load(&fixture.probe.executed) == 1);
-    assert(atomic_load(&fixture.probe.last) == 42);
-    assert(atomic_load(&fixture.probe.errors) == 0);
-    assert(orbit_service_get_stats(&fixture.service, &stats));
-    assert(stats.machine.accepted == 1u);
-    assert(stats.machine.completed == 1u);
+    CHECK(atomic_load(&fixture.probe.observed) == 1);
+    CHECK(atomic_load(&fixture.probe.executed) == 1);
+    CHECK(atomic_load(&fixture.probe.last) == 42);
+    CHECK(atomic_load(&fixture.probe.errors) == 0);
+    CHECK(orbit_service_get_stats(&fixture.service, &stats));
+    CHECK(stats.machine.accepted == 1u);
+    CHECK(stats.machine.completed == 1u);
 
-    assert(orbit_service_request_stop(&fixture.service) == CFLOW_ACTOR_OK);
+    CHECK(orbit_service_request_stop(&fixture.service) == CFLOW_ACTOR_OK);
     attempts = 0u;
     while (cflow_actor_current_state(&fixture.service.actor) !=
                 CFLOW_ACTOR_STATE_STOPPED && attempts++ < 512u)
         (void)cflow_executor_run_one(&fixture.executor);
-    assert(orbit_service_wait(&fixture.service) == CFLOW_ACTOR_STATE_STOPPED);
-    assert(atomic_load(&fixture.probe.done) == 1);
+    CHECK(cflow_actor_current_state(&fixture.service.actor) ==
+          CFLOW_ACTOR_STATE_STOPPED);
+    CHECK(orbit_service_wait(&fixture.service) == CFLOW_ACTOR_STATE_STOPPED);
+    CHECK(atomic_load(&fixture.probe.done) == 1);
 
-    assert(orbit_service_ref_try_send(&ref, 10u, &input) ==
+    CHECK(orbit_service_ref_try_send(&ref, 10u, &input) ==
            CFLOW_ACTOR_SEND_STOPPED);
 
     /* Existing CFlow producer refs are safe after Actor owner destruction. */
     orbit_service_destroy(&fixture.service);
-    assert(orbit_service_ref_try_send(&retained, 10u, &input) ==
+    CHECK(orbit_service_ref_try_send(&retained, 10u, &input) ==
            CFLOW_ACTOR_SEND_STALE);
     orbit_service_ref_release(&retained);
     orbit_service_ref_release(&ref);
-    assert(retained.actor.impl == NULL && retained.methods == NULL);
-    assert(ref.actor.impl == NULL && ref.methods == NULL);
+    CHECK(retained.actor.impl == NULL && retained.methods == NULL);
+    CHECK(ref.actor.impl == NULL && ref.methods == NULL);
 
     fixture_destroy(&fixture);
     return 0;
