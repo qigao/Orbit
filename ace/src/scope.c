@@ -8,6 +8,7 @@ typedef struct orbit_ace_scope_impl {
     const orbit_service *service;
     const orbit_call_port *call_port;
     uint64_t generation_id;
+    bool valid_generation;
     bool bound;
 } orbit_ace_scope_impl;
 
@@ -55,6 +56,7 @@ orbit_ace_scope_status orbit_ace_scope_guard_open(
         return ORBIT_ACE_SCOPE_GENERATION_MISMATCH;
     }
 
+    impl->valid_generation = true;
     guard->impl = impl;
     return ORBIT_ACE_SCOPE_OK;
 }
@@ -64,7 +66,8 @@ salts_service_host_status orbit_ace_scope_guard_find_service(
     const cmeta_interface_desc *interface_desc,
     salts_configurator_service *out_service) {
     orbit_ace_scope_impl *impl = orbit_ace_live(guard);
-    if (impl == NULL || interface_desc == NULL || out_service == NULL ||
+    if (impl == NULL || !impl->valid_generation ||
+        interface_desc == NULL || out_service == NULL ||
         !impl->scope.live)
         return SALTS_SERVICE_HOST_INVALID_ARGUMENT;
     return salts_service_host_scope_find_service(
@@ -76,7 +79,8 @@ orbit_ace_scope_status orbit_ace_scope_guard_bind(
     const orbit_service *service,
     const orbit_call_port *call_port) {
     orbit_ace_scope_impl *impl = orbit_ace_live(guard);
-    if (impl == NULL || !impl->scope.live || service == NULL ||
+    if (impl == NULL || !impl->valid_generation ||
+        !impl->scope.live || service == NULL ||
         service->actor.impl == NULL ||
         (call_port != NULL &&
          !orbit_call_port_is_bound_to(call_port, service)))
@@ -92,7 +96,8 @@ orbit_ace_scope_status orbit_ace_scope_guard_bind(
 uint64_t orbit_ace_scope_guard_generation_id(
     const orbit_ace_scope_guard *guard) {
     orbit_ace_scope_impl *impl = orbit_ace_live(guard);
-    return impl == NULL || !impl->scope.live ? 0u : impl->generation_id;
+    return impl == NULL || !impl->valid_generation ||
+        !impl->scope.live ? 0u : impl->generation_id;
 }
 
 orbit_ace_scope_status orbit_ace_scope_guard_try_release(
