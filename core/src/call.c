@@ -30,6 +30,7 @@ typedef struct orbit_call_slot {
 } orbit_call_slot;
 
 typedef struct orbit_call_impl {
+    const orbit_service *owner; /* address-stable, borrowed until port destroy */
     cmeta_mutex_t mutex;
     orbit_call_slot *slots;
     size_t capacity;
@@ -157,10 +158,12 @@ static bool orbit_call_method_is_u64(
     return false;
 }
 
-orbit_call_status orbit_call_port_init(orbit_call_port *port,
-                                      size_t capacity) {
+orbit_call_status orbit_call_port_init(
+    orbit_call_port *port, const orbit_service *owner, size_t capacity) {
     orbit_call_impl *impl;
-    if (port == NULL || port->impl != NULL || capacity == 0u ||
+    if (port == NULL || port->impl != NULL || owner == NULL ||
+        owner->actor.impl == NULL || owner->methods == NULL ||
+        owner->method_count == 0u || capacity == 0u ||
         capacity > (size_t)UINT32_MAX ||
         capacity > SIZE_MAX / sizeof(orbit_call_slot))
         return ORBIT_CALL_INVALID_ARGUMENT;
@@ -179,6 +182,7 @@ orbit_call_status orbit_call_port_init(orbit_call_port *port,
         return ORBIT_CALL_ALLOCATION_FAILED;
     }
     impl->capacity = capacity;
+    impl->owner = owner;
     impl->close_reason = ORBIT_CALL_TERMINAL_STOPPED;
     port->impl = impl;
     return ORBIT_CALL_OK;
@@ -201,7 +205,9 @@ orbit_call_status orbit_call_u64_async(
     if (out_token != NULL) *out_token = 0u;
     if (out_send != NULL) *out_send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
     if (impl == NULL || out_token == NULL || out_send == NULL ||
-        terminal == NULL || service == NULL || method == 0u)
+        terminal == NULL || service == NULL || method == 0u ||
+        impl->owner->actor.impl == NULL ||
+        impl->owner->actor.impl != service->actor.impl)
         return ORBIT_CALL_INVALID_ARGUMENT;
     if (!orbit_call_method_is_u64(service, method, &found))
         return found ? ORBIT_CALL_TYPE_MISMATCH : ORBIT_CALL_INVALID_ARGUMENT;
@@ -455,7 +461,8 @@ orbit_call_status orbit_call_port_try_destroy(orbit_call_port *port) {
      * before this owner-side call; close callbacks/submissions are tracked
      * solely to reject destruction during those known live obligations. */
     cmeta_mutex_lock(&impl->mutex);
-    if (!impl->closed || impl->submitting != 0u ||
+    if (!impl->closed || impl->owner->actor.impl != NULL ||
+        impl->submitting != 0u ||
         impl->closing_calls != 0u || impl->callbacks_inflight != 0u) {
         cmeta_mutex_unlock(&impl->mutex);
         return ORBIT_CALL_BUSY;
