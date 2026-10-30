@@ -39,6 +39,8 @@ typedef struct orbit_call_impl {
      */
     cflow_actor_ref actor_pin;
     const void *actor_identity;
+    const orbit_service_method *methods;  /* immutable catalog identity */
+    size_t method_count;
     cmeta_mutex_t mutex;
     orbit_call_slot *slots;
     size_t capacity;
@@ -142,12 +144,13 @@ static void orbit_call_deliver(orbit_call_impl *impl,
     cmeta_mutex_unlock(&impl->mutex);
 }
 
-static bool orbit_call_method_is_u64(
+static bool orbit_call_method_is_token(
     const orbit_service_ref *service, orbit_method_id method,
-    bool *out_found) {
+    bool *out_found, cflow_event_id *out_event_id) {
     size_t first = 0u;
     size_t last;
     *out_found = false;
+    *out_event_id = 0u;
     if (service == NULL || service->actor.impl == NULL ||
         service->methods == NULL || method == 0u)
         return false;
@@ -157,8 +160,12 @@ static bool orbit_call_method_is_u64(
         const orbit_service_method *candidate = &service->methods[index];
         if (candidate->id == method) {
             *out_found = true;
-            return cmeta_type_equal(candidate->request_type,
-                                    &cmeta_type_uint64);
+            if (candidate->flags != ORBIT_METHOD_CALL_TOKEN ||
+                !cmeta_type_equal(candidate->request_type,
+                                  &cmeta_type_uint64))
+                return false;
+            *out_event_id = candidate->event_id;
+            return true;
         }
         if (candidate->id < method) first = index + 1u;
         else last = index;
@@ -198,6 +205,8 @@ orbit_call_status orbit_call_port_init(
     impl->capacity = capacity;
     impl->owner = owner;
     impl->actor_identity = impl->actor_pin.impl;
+    impl->methods = owner->methods;
+    impl->method_count = owner->method_count;
     impl->close_reason = ORBIT_CALL_TERMINAL_STOPPED;
     port->impl = impl;
     return ORBIT_CALL_OK;
@@ -213,6 +222,7 @@ orbit_call_status orbit_call_u64_async(
     orbit_call_delivery delivery = {0};
     size_t index = 0u;
     uint64_t token = 0u;
+    cflow_event_id event_id = 0u;
     bool found;
     cflow_actor_send_status send_status;
     bool accepted;
@@ -221,9 +231,11 @@ orbit_call_status orbit_call_u64_async(
     if (out_send != NULL) *out_send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
     if (impl == NULL || out_token == NULL || out_send == NULL ||
         terminal == NULL || service == NULL || method == 0u ||
-        impl->actor_identity != service->actor.impl)
+        impl->actor_identity != service->actor.impl ||
+        impl->methods != service->methods ||
+        impl->method_count != service->method_count)
         return ORBIT_CALL_INVALID_ARGUMENT;
-    if (!orbit_call_method_is_u64(service, method, &found))
+    if (!orbit_call_method_is_token(service, method, &found, &event_id))
         return found ? ORBIT_CALL_TYPE_MISMATCH : ORBIT_CALL_INVALID_ARGUMENT;
 
     cmeta_mutex_lock(&impl->mutex);
@@ -260,8 +272,17 @@ orbit_call_status orbit_call_u64_async(
     ++impl->submitting;
     cmeta_mutex_unlock(&impl->mutex);
 
-    /* Borrowed token is copied into CFlow's ONE bounded Actor Mailbox. */
-    send_status = orbit_service_ref_try_send(service, method, &token);
+    /*
+     * Reserved CALL_TOKEN methods intentionally reject public generic send.
+     * The trusted port bridge submits ONE trivially-copied Event to the
+     * existing CFlow mailbox using the catalog-verified Event ID.
+     */
+    {
+        const cflow_event_view event = {
+            event_id, &cmeta_type_uint64, &token
+        };
+        send_status = cflow_actor_ref_try_send(&service->actor, &event);
+    }
     accepted = send_status == CFLOW_ACTOR_SEND_ACCEPTED;
 
     cmeta_mutex_lock(&impl->mutex);
