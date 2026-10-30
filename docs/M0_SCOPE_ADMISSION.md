@@ -27,7 +27,12 @@ resizable vector, moved after acquisition, or copied into a call slot.
 
 `Orbit::Core` remains a standalone static library linked against
 `Salts::CFlow` and `Salts::Platform`. The separate `Orbit::ACE`
-static target explicitly links `Orbit::Core` and `Salts::ServiceHost`.
+static target is built only with the explicit `-DORBIT_BUILD_ACE=ON`
+selection and links `Orbit::Core` and `Salts::ServiceHost`. With the
+default `OFF` only `Orbit::Core` is built, without requiring a
+ServiceHost target. An explicitly selected missing `Salts::ServiceHost`
+is a hard CMake error, not a probe or fallback.
+
 The real Salts 3.0 CMake package remains the one ABI authority. No dynamic
 loader, application thread, scheduler, message queue or fallbacks are created.
 
