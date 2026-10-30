@@ -30,6 +30,7 @@ typedef struct call_probe {
     atomic_int cancelled;
     atomic_int stopped;
     atomic_int application_errors;
+    atomic_int no_reply;
     atomic_int callback_count;
     atomic_uint_fast64_t latest_response;
     atomic_uint_fast64_t latest_token;
@@ -76,10 +77,12 @@ static bool call_action(void *user, const void *state, const void *event,
                 cmeta_sleep_ms(1u);
             CHECK(atomic_load(&fixture->probe.release_action));
         }
-        status = orbit_call_u64_stage_reply(
-            &fixture->calls, token, 10u,
-            request == 999u ? 17 : 0, request + 1u);
-        CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
+        if (request != 12345u) {
+            status = orbit_call_u64_stage_reply(
+                &fixture->calls, token, 10u,
+                request == 999u ? 17 : 0, request + 1u);
+            CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
+        }
     } else {
         CHECK(status == ORBIT_CALL_STALE);
         atomic_fetch_add(&fixture->probe.skipped_cancelled, 1);
@@ -87,7 +90,8 @@ static bool call_action(void *user, const void *state, const void *event,
     /* State and observation are constructed by this existing CFlow action;
      * the observation is visible only AFTER the Machine commits its state.
      */
-    *(int *)out_state = *(const int *)state + 1;
+    *(int *)out_state = *(const int *)state +
+        (status == ORBIT_CALL_OK ? 1 : 0);
     *(uint64_t *)out_observation = token;
     *out_error = NULL;
     return true;
@@ -138,6 +142,9 @@ static void call_terminal(void *user, uint64_t token,
         case ORBIT_CALL_TERMINAL_APPLICATION_ERROR:
             CHECK(application_status == 17);
             atomic_fetch_add(&probe->application_errors, 1);
+            break;
+        case ORBIT_CALL_TERMINAL_NO_REPLY:
+            atomic_fetch_add(&probe->no_reply, 1);
             break;
         case ORBIT_CALL_TERMINAL_CANCELLED:
             atomic_fetch_add(&probe->cancelled, 1);
@@ -247,6 +254,13 @@ static void test_mailbox_rejection_and_postcommit(void) {
         &f.probe, &token, &send_status) == ORBIT_CALL_OK);
     CHECK(token != 0u && send_status == CFLOW_ACTOR_SEND_ACCEPTED);
     CHECK(atomic_load(&f.probe.callback_count) == 0);
+    {
+        uint64_t probe_request = 0u;
+        CHECK(orbit_call_u64_request(
+            &f.calls, token, 20u, &probe_request) == ORBIT_CALL_TYPE_MISMATCH);
+        CHECK(orbit_call_u64_stage_reply(
+            &f.calls, token, 20u, 0, 5u) == ORBIT_CALL_TYPE_MISMATCH);
+    }
 
     CHECK(orbit_call_u64_async(
         &f.calls, &f.ref, 10u, 42u, call_terminal,
@@ -268,6 +282,18 @@ static void test_mailbox_rejection_and_postcommit(void) {
     CHECK(orbit_call_port_get_stats(&f.calls, &stats));
     CHECK(stats.admitted == 1u && stats.completed_success == 1u &&
           stats.occupied == 0u);
+    /* A committed CFlow observation without a staged business reply is a
+     * terminal protocol failure, never a hung or invented success.
+     */
+    {
+        uint64_t forgotten = 0u;
+        CHECK(orbit_call_u64_async(
+            &f.calls, &f.ref, 10u, 12345u, call_terminal,
+            &f.probe, &forgotten, &send_status) == ORBIT_CALL_OK);
+        fixture_drive_until(&f, &f.probe.no_reply, 1);
+        CHECK(atomic_load(&f.probe.callback_count) == 2);
+        CHECK(orbit_call_u64_cancel(&f.calls, forgotten) == ORBIT_CALL_STALE);
+    }
     fixture_destroy(&f);
 }
 
