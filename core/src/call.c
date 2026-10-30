@@ -31,6 +31,7 @@ typedef struct orbit_call_slot {
 
 typedef struct orbit_call_impl {
     const orbit_service *owner; /* address-stable, borrowed until port destroy */
+    const void *actor_identity;  /* immutable CFlow producer control identity */
     cmeta_mutex_t mutex;
     orbit_call_slot *slots;
     size_t capacity;
@@ -183,6 +184,7 @@ orbit_call_status orbit_call_port_init(
     }
     impl->capacity = capacity;
     impl->owner = owner;
+    impl->actor_identity = owner->actor.impl;
     impl->close_reason = ORBIT_CALL_TERMINAL_STOPPED;
     port->impl = impl;
     return ORBIT_CALL_OK;
@@ -206,8 +208,7 @@ orbit_call_status orbit_call_u64_async(
     if (out_send != NULL) *out_send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
     if (impl == NULL || out_token == NULL || out_send == NULL ||
         terminal == NULL || service == NULL || method == 0u ||
-        impl->owner->actor.impl == NULL ||
-        impl->owner->actor.impl != service->actor.impl)
+        impl->actor_identity != service->actor.impl)
         return ORBIT_CALL_INVALID_ARGUMENT;
     if (!orbit_call_method_is_u64(service, method, &found))
         return found ? ORBIT_CALL_TYPE_MISMATCH : ORBIT_CALL_INVALID_ARGUMENT;
