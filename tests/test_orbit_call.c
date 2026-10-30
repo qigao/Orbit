@@ -588,6 +588,9 @@ static void test_foreign_actor_and_catalog_rejected(void) {
 
     fixture_prepare(&first, 2u, 2u);
     fixture_prepare(&second, 2u, 2u);
+    CHECK(orbit_call_port_is_bound_to(&first.calls, &first.service));
+    CHECK(!orbit_call_port_is_bound_to(&first.calls, &second.service));
+    CHECK(orbit_call_port_is_bound_to(&second.calls, &second.service));
 
     CHECK(orbit_call_u64_async(
         &first.calls, &second.ref, 10u, 55u, call_terminal,
