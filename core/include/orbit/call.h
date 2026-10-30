@@ -169,6 +169,14 @@ orbit_call_status orbit_call_u64_cancel(orbit_call_port *port, uint64_t token);
 orbit_call_status orbit_call_port_close(
     orbit_call_port *port, orbit_call_terminal reason);
 
+/*
+ * Startup-time owner check for the optional Orbit::ACE lifetime guard.
+ * The caller must serialize this query with Service/port destroy. No
+ * copy of CFlow's private control block or new ownership authority.
+ */
+bool orbit_call_port_is_bound_to(
+    const orbit_call_port *port, const orbit_service *service);
+
 bool orbit_call_port_get_stats(
     const orbit_call_port *port, orbit_call_port_stats *out);
 
