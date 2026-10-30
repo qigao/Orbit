@@ -11,14 +11,18 @@ if(NOT TARGET Salts::CFlow)
   message(FATAL_ERROR "Orbit::Core requires the installed Salts::CFlow target")
 endif()
 
-add_library(orbit_core STATIC core/src/service.c)
+add_library(orbit_core STATIC
+  core/src/service.c
+  core/src/call.c)
 add_library(Orbit::Core ALIAS orbit_core)
 set_target_properties(orbit_core PROPERTIES EXPORT_NAME Core)
 target_compile_features(orbit_core PUBLIC c_std_11)
 target_include_directories(orbit_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/core/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-target_link_libraries(orbit_core PUBLIC Salts::CFlow)
+target_link_libraries(orbit_core
+  PUBLIC Salts::CFlow
+  PRIVATE Salts::Platform)
 
 if(BUILD_TESTING)
   add_subdirectory(tests)
