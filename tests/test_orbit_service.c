@@ -15,7 +15,7 @@
 /* Assertions must run in Release as well as Debug (no NDEBUG bypass). */
 #define CHECK(expression) do { \
     if (!(expression)) { \
-        fprintf(stderr, "%s:%d: failed: %s\\n", __FILE__, __LINE__, #expression); \
+        fprintf(stderr, "%s:%d: failed: %s\n", __FILE__, __LINE__, #expression); \
         abort(); \
     } \
 } while (0)
