@@ -39,6 +39,9 @@ typedef struct call_probe {
     atomic_bool block_action;
     atomic_bool action_entered;
     atomic_bool release_action;
+    atomic_bool block_terminal;
+    atomic_bool terminal_entered;
+    atomic_bool release_terminal;
 } call_probe;
 
 typedef struct call_fixture {
@@ -179,6 +182,13 @@ static void call_terminal(void *user, uint64_t token,
             CHECK(0 && "unexpected terminal");
             break;
     }
+    if (atomic_load(&probe->block_terminal)) {
+        size_t checks = 0u;
+        atomic_store(&probe->terminal_entered, true);
+        while (!atomic_load(&probe->release_terminal) && checks++ < 5000u)
+            cmeta_sleep_ms(1u);
+        CHECK(atomic_load(&probe->release_terminal));
+    }
 }
 
 static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
@@ -207,6 +217,9 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
     atomic_init(&fixture->probe.block_action, false);
     atomic_init(&fixture->probe.action_entered, false);
     atomic_init(&fixture->probe.release_action, false);
+    atomic_init(&fixture->probe.block_terminal, false);
+    atomic_init(&fixture->probe.terminal_entered, false);
+    atomic_init(&fixture->probe.release_terminal, false);
     CHECK(cflow_machine_build(&fixture->machine, &definition) == CFLOW_MACHINE_OK);
     CHECK(cflow_executor_owner_init_with_capacity(
         &fixture->executor, 64u, NULL, NULL));
@@ -464,10 +477,89 @@ static void test_cancel_during_real_actor_action(void) {
     fixture_destroy(&f);
 }
 
+/*
+ * One blocked terminal callback must HOLD its call-slot credit.
+ * A second real thread must observe FULL instead of spinning up another
+ * callback on the same slot before the first terminal has returned.
+ */
+typedef struct terminal_credit_context {
+    call_fixture *fixture;
+    atomic_int result;
+    atomic_int in_flight;
+} terminal_credit_context;
+
+static void attempt_while_terminal_is_running(void *user) {
+    terminal_credit_context *ctx = (terminal_credit_context *)user;
+    call_fixture *f = ctx->fixture;
+    uint64_t rejected_token = UINT64_MAX;
+    cflow_actor_send_status rejected_send = CFLOW_ACTOR_SEND_ACCEPTED;
+    orbit_call_port_stats stats = {0};
+    size_t checks = 0u;
+
+    while (!atomic_load(&f->probe.terminal_entered) && checks++ < 5000u)
+        cmeta_sleep_ms(1u);
+
+    if (atomic_load(&f->probe.terminal_entered)) {
+        const orbit_call_status result = orbit_call_u64_async(
+            &f->calls, &f->ref, 10u, 72u, call_terminal, &f->probe,
+            &rejected_token, &rejected_send);
+        CHECK(rejected_token == 0u);
+        CHECK(orbit_call_port_get_stats(&f->calls, &stats));
+        CHECK(stats.callbacks_inflight == 1u);
+        CHECK(stats.occupied == 1u);
+        atomic_store(&ctx->in_flight, (int)stats.callbacks_inflight);
+        atomic_store(&ctx->result, (int)result);
+    }
+    atomic_store(&f->probe.release_terminal, true);
+}
+
+static void test_terminal_callback_holds_credit(void) {
+    call_fixture f;
+    terminal_credit_context ctx;
+    cmeta_thread_t thread = NULL;
+    cflow_actor_send_status send;
+    orbit_call_port_stats stats;
+    uint64_t token = 0u;
+
+    fixture_prepare(&f, 2u, 1u);
+    atomic_store(&f.probe.block_terminal, true);
+    CHECK(orbit_call_u64_async(
+        &f.calls, &f.ref, 10u, 41u, call_terminal,
+        &f.probe, &token, &send) == ORBIT_CALL_OK);
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.fixture = &f;
+    atomic_init(&ctx.result, ORBIT_CALL_BUSY);
+    atomic_init(&ctx.in_flight, 0);
+    CHECK(cmeta_thread_create(
+        &thread, attempt_while_terminal_is_running, &ctx) == 0);
+
+    fixture_drive_until(&f, &f.probe.observed, 1);
+    CHECK(cmeta_thread_join(&thread) == 0);
+    CHECK(atomic_load(&ctx.result) == ORBIT_CALL_FULL);
+    CHECK(atomic_load(&ctx.in_flight) == 1);
+    CHECK(atomic_load(&f.probe.successes) == 1);
+
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.occupied == 0u);
+    CHECK(stats.callbacks_inflight == 0u);
+    CHECK(stats.rejected_full == 1u);
+
+    /* Only after the callback returns is the SAME credit reusable. */
+    atomic_store(&f.probe.block_terminal, false);
+    CHECK(orbit_call_u64_async(
+        &f.calls, &f.ref, 10u, 73u, call_terminal,
+        &f.probe, &token, &send) == ORBIT_CALL_OK);
+    fixture_drive_until(&f, &f.probe.successes, 2);
+    CHECK(atomic_load(&f.probe.latest_response) == 74u);
+    fixture_destroy(&f);
+}
+
 int main(void) {
     test_mailbox_rejection_and_postcommit();
     test_cancel_credit_reuse();
     test_close_and_stale_terminal();
     test_cancel_during_real_actor_action();
+    test_terminal_callback_holds_credit();
     return 0;
 }
