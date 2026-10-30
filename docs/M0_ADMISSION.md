@@ -17,6 +17,17 @@ The upstream currently inspected is Salts 3 `master` with `Salts::CFlow`/CMeta/S
 
 No installed Salts 3 SDK is present in the current authoring environment; **the branch has not yet been linked or run against Salts 3**. No GREEN CI claim is made. The first real executable gate is configure/build/CTest with an immutable Salts 3 SDK and its transitive SaltsCore/Crypto dependencies. Missing SDK is an explicit blocker, not permission to add a fake proxy header, second runtime or compatibility switch.
 
+## Stacked M0b call implementation
+
+A separate [M0b Draft PR #11](https://github.com/qigao/Orbit/pull/11)
+builds on this M0a baseline: fixed-credit u64 unary calls over the exact
+CFlow Actor event, post-commit CFlow observation, generation-checked
+correlation and callback-credit fencing. Its call-only method-kind metadata,
+retained upstream CFlow Actor identity and COMPLETING terminal-credit
+ownership are separate source changes; they are not merged into M0a or
+verified with a real installed Salts 3 SDK. See
+[the M0b contract](M0_CALL_ADMISSION.md).
+
 ## Deliberately not implemented
 
 - `call/reply/timeout` correlation, generation-checked reply slots or exactly-once **per-call** terminal callbacks. CFlow Actor's `on_value` observation is not a replacement for these obligations.
