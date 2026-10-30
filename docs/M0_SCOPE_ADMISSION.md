@@ -112,17 +112,21 @@ application code must use its explicit CFlow owner and stop/wait/drain steps.
 
 ## Native conformance
 
-`tests/test_orbit_scope.c` uses a **real**
-`salts_service_host_runtime_init/destroy` with no published generation and
-verifies fail-closed admission: no fake Service, no synthetic Scope, no
-generation identity, no leaked Scope count.
+`tests/test_orbit_scope.c` uses the **real Salts ServiceHost**
+public calls: it first checks fail-closed admission on an unpublished runtime,
+then builds/publishes two actual **empty static Configurator generations**
+N=11 and N+1=12. This is a legitimate lifecycle-only case (NOT a fake
+Provider/Plugin). It checks that a mismatched generation does not leak a
+scope, an old live Scope survives publication of N+1, and the original
+`salts_service_host_generation_drain` reports BUSY until the exact original
+Scope is released. No test mutates private counters to fake success.
 
-The **positive** acceptance still needs a real started/static or DSO Provider
-generation, a bound native CFlow Actor and Port, N->N+1 publication,
-`generation_drain() == BUSY` while a Scope is live, release after terminal,
-and actual Plugin unload quiescence. It must use the existing Salts/Orbit
-native test graphs—not a new installer/consumer project—and run against an
-immutable same-epoch Salts 3 SDK.
+The remaining **provider-level** acceptance needs a real static or DSO
+Provider generation, a bound CFlow Actor and Call Port, N->N+1 publication,
+release only after native Actor terminal, and actual Plugin unload
+quiescence. It must use the existing Salts/Orbit native test graphs—not a
+new installer/consumer project—and run against an immutable same-epoch
+Salts 3 SDK. Source presence is NOT a passing CTest result.
 
 ## Build/release gates
 
