@@ -38,12 +38,11 @@ typedef struct orbit_call_slot {
 typedef struct orbit_call_impl {
     const orbit_service *owner; /* address-stable, borrowed until port destroy */
     /*
-     * RETAIN a real CFlow producer reference while this port lives.
-     * Merely caching actor.impl would allow allocator-address reuse after
-     * the Actor owner was destroyed and all other refs were released.
-     * This pin keeps the CFlow control block (and its identity) alive.
+     * Retain one complete Orbit producer ref: it pins BOTH the original
+     * CFlow Actor control identity and the Core-owned immutable catalog
+     * while this CallPort lives, even after Service owner destruction.
      */
-    cflow_actor_ref actor_pin;
+    orbit_service_ref actor_pin;
     const void *actor_identity;
     const orbit_service_method *methods;  /* immutable catalog identity */
     size_t method_count;
@@ -224,7 +223,7 @@ orbit_call_status orbit_call_port_init(
         free(impl);
         return ORBIT_CALL_ALLOCATION_FAILED;
     }
-    if (!cflow_actor_ref_acquire(&owner->actor, &impl->actor_pin)) {
+    if (!orbit_service_ref_acquire(owner, &impl->actor_pin)) {
         cmeta_mutex_destroy(&impl->mutex);
         free(impl->slots);
         free(impl);
@@ -232,9 +231,9 @@ orbit_call_status orbit_call_port_init(
     }
     impl->capacity = capacity;
     impl->owner = owner;
-    impl->actor_identity = impl->actor_pin.impl;
-    impl->methods = owner->methods;
-    impl->method_count = owner->method_count;
+    impl->actor_identity = impl->actor_pin.actor.impl;
+    impl->methods = impl->actor_pin.methods;
+    impl->method_count = impl->actor_pin.method_count;
     impl->close_reason = ORBIT_CALL_TERMINAL_STOPPED;
     port->impl = impl;
     return ORBIT_CALL_OK;
@@ -557,7 +556,7 @@ orbit_call_status orbit_call_port_try_destroy(orbit_call_port *port) {
      * Owner Actor is already destroyed and no submissions/callbacks remain.
      * Release the retained upstream producer identity ONLY at this boundary.
      */
-    cflow_actor_ref_release(&impl->actor_pin);
+    orbit_service_ref_release(&impl->actor_pin);
     cmeta_mutex_destroy(&impl->mutex);
     free(impl->slots);
     free(impl);

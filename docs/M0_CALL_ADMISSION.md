@@ -7,7 +7,7 @@
 
 The new `Orbit::Core` `orbit/call.h` + `core/src/call.c` provide a **bounded response-credit/correlation port** on top of the existing CFlow Actor. It does not introduce a second Actor, queue, Scheduler, Executor, timeout engine or network transport.
 
-1. `orbit_call_port_init(&port, &service, capacity)` allocates exactly `capacity` u64 call slots and one Salts Platform mutex, and **retains a canonical CFlow Actor producer reference**. This prevents Actor control-address reuse while the port lives. No allocation in `orbit_call_u64_async`, reply observation, cancellation or close.
+1. `orbit_call_port_init(&port, &service, capacity)` allocates exactly `capacity` u64 call slots and one Salts Platform mutex, and **retains a complete Orbit producer reference**, thereby pinning both canonical CFlow Actor identity and Core-owned method catalog. No allocation in `orbit_call_u64_async`, reply observation, cancellation or close.
 2. `orbit_call_u64_async` atomically reserves one slot, records callback/request and submits a 64-bit **generation-checked token** to one existing CFlow `uint64` Event with `cflow_actor_ref_try_send()`. That Event must be declared `ORBIT_METHOD_CALL_TOKEN`: ordinary `orbit_service_ref_try_send()` explicitly rejects it, so a caller cannot accidentally inject raw `send` traffic into the call path. A CFlow FULL/STOPPING/etc. rejection releases the slot **without invoking a callback** and returns the exact upstream send status.
 3. The CFlow Machine Action is a deterministic token projection: it constructs a new Machine state and copies the token into its u64 observation. It neither calls arbitrary business code nor touches the mutable call-port; its output must satisfy the CFlow `DETERMINISTIC | NO_ALIAS` admission contract.
 4. On the CFlow `on_value` observation *after Machine commit*, the typed business adapter copies the request from the call slot, executes the native handler and stages its result. The same observer then calls `orbit_call_u64_observe()` to claim one terminal outside the pool mutex. Missing staged reply -> `TERMINAL_NO_REPLY`.
@@ -52,9 +52,9 @@ This is a **u64/u64 experimental first slice**. It is not a generic CMeta type s
 ## Correctness and ownership
 
 - The token is `(generation << 32) | (index + 1)`, and an older generation never matches a reused slot.
-- The port **retains a true CFlow producer reference** through destruction, which pins the Actor control identity and protects against allocator address reuse. It refuses a different Service producer reference or method catalog, without racing a mutable Actor owner. `try_destroy` returns BUSY until the original Actor owner has actually been destroyed.
+- The port **retains a full Orbit producer reference** through destruction, pinning both the CFlow Actor control identity and the Core-owned method snapshot. It refuses a different Actor or catalog and returns BUSY until the original Actor owner has actually been destroyed.
 - Request/reply are plain inline u64. No pointer, callback-scoped CSerde view or nontrivial resource crosses the Actor mailbox.
-- Producer/ref/method table must remain valid through `orbit_call_u64_async`. Plugin-owned callbacks and descriptors must remain leased through **Actor and port terminal/quiescence**, **not just until local callback fires**. The current M0a reference is borrowed; full ServiceHost generation pinning is still open.
+- Each producer/CallPort reference owns a Core catalog-snapshot credit. The original input method table can be overwritten after spawn. Provider-owned callback code/CMeta type descriptors must still remain leased until **Actor and Port terminal/quiescence**, not just until local callback fires. Old stale producer refs retain only Core catalog bytes/CFlow control identity; full ServiceHost generation pinning is a separate open gate.
 - Terminal callbacks are invoked outside the mutex. Their thread is whichever CFlow observation or cancel/close caller wins. A callback can be delivered **before `call_async` returns** when a worker finishes rapidly; consumers must synchronize callback outputs.
 - Cancelling a call does not undo an already committed CFlow Machine transition or a business handler already running in the post-commit observer. Successful RPC/DB COMMIT is a different, stronger fact and is **not claimed**.
 - An actor that fails/stops before emitting an observation must explicitly call `orbit_call_port_close` on on_error/on_done; otherwise no terminal is justified. An application must never free the port before the Actor and all completion/producer callers quiesce.
@@ -62,7 +62,7 @@ This is a **u64/u64 experimental first slice**. It is not a generic CMeta type s
 - Pre-bound `ORBIT_METHOD_CALL_TOKEN` and the CFlow producer ref are **accidental-use isolation**, not an authorization sandbox: callers with raw `cflow_actor_ref` access are already within the trusted native integration boundary.
 - Terminal callbacks must return normally and must not perform port or Actor destruction themselves. `occupied` counts `COMPLETING` slots, and `callbacks_inflight` measures the credits awaiting callback return.
 - This M0b post-commit business adapter requires a **single serialized CFlow Subscriber/Actor execution owner**, as in the native owner-affine test configuration. A generic worker Scheduler that can invoke observers on unrelated threads is not automatically an Actor state owner; broader execution-policy admission is still pending.
-- `orbit_call_port_try_destroy()` is nonblocking, returns BUSY while the bound Actor is not destroyed or while submitting/closing/callback credits remain, and requires quiescence of all external API users as an explicit precondition. It releases the retained upstream CFlow producer identity only on successful destruction. This is not a magic cancellation or stream-owner wait.
+- `orbit_call_port_try_destroy()` is nonblocking, returns BUSY while the bound Actor is not destroyed or while submitting/closing/callback credits remain, and requires quiescence of all external API users as an explicit precondition. It releases both the retained upstream CFlow producer identity and Core catalog snapshot only on successful destruction. This is not a magic cancellation or stream-owner wait.
 
 ## Existing native conformance source
 
@@ -84,6 +84,6 @@ All CTest checks remain active under `NDEBUG`. Tests must be built/run with an *
 
 - Resolve present Salts 3 immutable SDK/SaltsCore versions and compile the exact PR HEAD, Debug/Release, Windows/Linux, with the real public ABI. No old Salts fallback or synthetic substitute headers.
 - Full pointer/owned-buffer request/response generated from canonical `salts-idlc` and DataBind lifecycle; **do not** use u64/pointer casts to smuggle managed state into CFlow.
-- Integrated ServiceHost Scope pinning across local Actor lifetime, retained refs and replies. Existing method tables remain borrowed until every producer ref is settled.
+- Integrated ServiceHost Scope pinning across local Actor lifetime and replies remains open. Borrowed provider code/descriptors must outlive Actor+CallPort; Core-owned method-catalog bytes remain separately retained until the final stale producer ref settles. The old borrowed input table is no longer a producer-lifetime dependency.
 - Additional ABA stress and callback reentrancy/stop/admit race tests, bounded deadlines (no new timer), stats and exhaustive cleanup.
 - Full `Orbit::Service` unified `spawn/send/call/reply/stop` contract, H2 integration and Directory remain pending.

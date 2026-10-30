@@ -96,11 +96,13 @@ typedef struct orbit_call_port_stats {
 /*
  * Exactly capacity bounded slots, one Salts Platform mutex and no data-path
  * allocations. capacity is in [1, UINT32_MAX]; token generation never wraps.
- * Port retains one upstream cflow_actor_ref to PIN the Actor control block
- * identity, and borrows the immutable method table and address-stable,
- * already-spawned Orbit Service owner. The port rejects references with
- * another Actor or method catalog and MUST outlive that owner's
- * cflow_actor_destroy. Zero-initialize the port; never copy/move it.
+ * Port retains a full orbit_service_ref to PIN both the upstream CFlow Actor
+ * control identity and the Core-owned immutable method catalog snapshot.
+ * The address-stable already-spawned Service owner is borrowed until the Port
+ * is destroyed; its native CMeta/Provider descriptors must remain live while
+ * the Actor runs, but old producer refs need no DSO after Actor destroy.
+ * Port rejects foreign Actor/catalog refs and MUST outlive the Actor's
+ * cflow_actor_destroy. Zero-initialize the Port; never copy/move it.
  */
 orbit_call_status orbit_call_port_init(
     orbit_call_port *port, const orbit_service *owner, size_t capacity);
@@ -116,8 +118,9 @@ orbit_call_status orbit_call_port_init(
  *
  * The method must be declared ORBIT_METHOD_CALL_TOKEN with CMeta uint64
  * Event payload. Generic orbit_service_ref_try_send rejects this reserved
- * Event kind. The Service method catalog and CFlow producer ref must remain
- * borrowed-live for the whole submission. This is not an authorization
+ * Event kind. Its catalog is held by independent Core refcounted snapshots,
+ * while CFlow owns the Actor producer ref lifetime. All producer API callers
+ * must quiesce before destroying their individual ref. This is not an authorization
  * boundary for a caller already holding a raw native cflow_actor_ref.
  * No async call is admitted if the pool has no free slot/credit.
  */

@@ -19,11 +19,18 @@ extern "C" {
  * the request. It does not imply an action ran, a reply was sent, or a
  * transaction committed. The producer retains its original request value.
  *
- * Service and producer handles are non-copyable by contract. A retained
- * producer reference can outlive Service destruction; its CFlow handle then
- * reports STALE. The immutable method table and CMeta descriptors are
- * borrowed until EVERY producer reference is released. Prefer static
- * generated tables and hold the Provider/Plugin Scope for their lifetime.
+ * Service and producer handles are non-copyable by contract. At spawn one
+ * IMMUTABLE copy of the admitted method catalog is allocated by Orbit::Core
+ * and retained by the Service and each producer ref. The input catalog may
+ * be temporary; its CMeta type DESCRIPTORS remain borrowed by the CFlow
+ * Actor until Actor destruction. Retained producer refs may outlive Actor
+ * destruction: the Core-owned catalog stays valid, and CFlow checks STALE
+ * before it may use a borrowed descriptor from an unloaded Provider.
+ *
+ * A Plugin-owned callback, CFlow Machine or method type remains leased via
+ * ServiceHost until the Actor and CallPort have both been destroyed. An old
+ * producer ref is safe after that because it owns its catalog snapshot and
+ * its CFlow Actor control ref is stale.
  *
  * Machine, initial state, callbacks, Executor and Scheduler follow CFlow's
  * exact borrowed lifetime/owner rules. Callers serialize spawn/stop/destroy
@@ -52,7 +59,7 @@ typedef struct orbit_service_method {
 
 typedef struct orbit_service_config {
     const cflow_actor_config *actor;       /* borrowed CFlow Machine Actor config */
-    const orbit_service_method *methods;   /* borrowed immutable dispatch table */
+    const orbit_service_method *methods;   /* input copied at spawn */
     size_t method_count;                   /* bounded by Machine Event count */
 } orbit_service_config;
 
@@ -61,6 +68,7 @@ typedef struct orbit_service {
     cflow_actor actor;
     const orbit_service_method *methods;
     size_t method_count;
+    void *catalog;                         /* Core-owned opaque refcount owner */
 } orbit_service;
 
 /* Independently retained producer; zero-initialize before acquire/retain. */
@@ -68,6 +76,7 @@ typedef struct orbit_service_ref {
     cflow_actor_ref actor;
     const orbit_service_method *methods;
     size_t method_count;
+    void *catalog;                         /* retained Core-owned catalog */
 } orbit_service_ref;
 
 typedef enum orbit_service_spawn_status {
@@ -75,7 +84,8 @@ typedef enum orbit_service_spawn_status {
     ORBIT_SERVICE_INVALID_ARGUMENT,
     ORBIT_SERVICE_INVALID_METHOD,
     ORBIT_SERVICE_ACTOR_INIT_REJECTED,
-    ORBIT_SERVICE_ACTOR_START_REJECTED
+    ORBIT_SERVICE_ACTOR_START_REJECTED,
+    ORBIT_SERVICE_ALLOCATION_FAILED
 } orbit_service_spawn_status;
 
 typedef struct orbit_service_spawn_result {
@@ -92,9 +102,11 @@ typedef struct orbit_service_spawn_result {
 orbit_service_spawn_result orbit_service_spawn(
     orbit_service *service, const orbit_service_config *config);
 
-/* Acquire or retain an independent CFlow producer ref and borrowed method
- * catalog. Ref methods remain valid after service destroy ONLY while the
- * provider/catalog storage remains live; ref reports CFlow SEND_STALE.
+/* Acquire or retain an independently owned CFlow producer and Core-owned
+ * method catalog snapshot. No method-table bytes borrowed from the caller's
+ * input declaration survive spawn. The immutable catalog remains valid until
+ * the final retained producer ref is released, including after Actor destroy.
+ * A stale CFlow ref cannot dereference provider-owned type callbacks.
  */
 bool orbit_service_ref_acquire(const orbit_service *service,
                                orbit_service_ref *out);
@@ -119,8 +131,9 @@ cflow_actor_send_status orbit_service_ref_try_send(
 
 /* Ordinary CFlow Actor owner-side stop/wait/destroy semantics apply.
  * wait/destroy MUST NOT be called from a callback or the actor executor.
- * Borrowed Scheduler/Executor/Machine and method providers must outlive
- * destruction. The method table also outlives all remaining producer refs.
+ * Borrowed Scheduler/Executor/Machine and provider-owned TYPE descriptors
+ * must outlive Actor destruction. Core frees its catalog snapshot only after
+ * the Service root and all producer/CallPort references are released.
  */
 cflow_actor_status orbit_service_request_stop(orbit_service *service);
 cflow_actor_state orbit_service_wait(orbit_service *service);
