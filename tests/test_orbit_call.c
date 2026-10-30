@@ -214,6 +214,22 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
     };
     memset(fixture, 0, sizeof(*fixture));
     fixture->probe.port = &fixture->calls;
+    /* An all-zero byte image is not a substitute for C11 atomic_init. */
+    atomic_init(&fixture->probe.calls, 0);
+    atomic_init(&fixture->probe.action_executions, 0);
+    atomic_init(&fixture->probe.business_executions, 0);
+    atomic_init(&fixture->probe.skipped_cancelled, 0);
+    atomic_init(&fixture->probe.observed, 0);
+    atomic_init(&fixture->probe.done, 0);
+    atomic_init(&fixture->probe.errors, 0);
+    atomic_init(&fixture->probe.successes, 0);
+    atomic_init(&fixture->probe.cancelled, 0);
+    atomic_init(&fixture->probe.stopped, 0);
+    atomic_init(&fixture->probe.application_errors, 0);
+    atomic_init(&fixture->probe.no_reply, 0);
+    atomic_init(&fixture->probe.callback_count, 0);
+    atomic_init(&fixture->probe.latest_response, UINT64_C(0));
+    atomic_init(&fixture->probe.latest_token, UINT64_C(0));
     atomic_init(&fixture->probe.block_action, false);
     atomic_init(&fixture->probe.action_entered, false);
     atomic_init(&fixture->probe.release_action, false);
