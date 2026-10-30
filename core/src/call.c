@@ -496,6 +496,16 @@ orbit_call_status orbit_call_port_close(
     return ORBIT_CALL_OK;
 }
 
+bool orbit_call_port_is_bound_to(
+    const orbit_call_port *port, const orbit_service *service) {
+    orbit_call_impl *impl = orbit_call_live(port);
+    return impl != NULL && service != NULL &&
+        impl->owner == service &&
+        impl->actor_identity == service->actor.impl &&
+        impl->methods == service->methods &&
+        impl->method_count == service->method_count;
+}
+
 bool orbit_call_port_get_stats(const orbit_call_port *port,
                               orbit_call_port_stats *out) {
     orbit_call_impl *impl = orbit_call_live(port);
