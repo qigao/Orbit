@@ -380,6 +380,8 @@ static void test_close_and_stale_terminal(void) {
         &f.calls, ORBIT_CALL_TERMINAL_STOPPED) == ORBIT_CALL_OK);
     CHECK(atomic_load(&f.probe.callback_count) == 1);
     CHECK(atomic_load(&f.probe.stopped) == 1);
+    /* A closed pool is NOT proof the CFlow Actor has quiesced. */
+    CHECK(orbit_call_port_try_destroy(&f.calls) == ORBIT_CALL_BUSY);
     CHECK(orbit_call_u64_cancel(&f.calls, token) == ORBIT_CALL_STALE);
     CHECK(orbit_call_u64_stage_reply(&f.calls, token, 10u, 0, 50u) ==
           ORBIT_CALL_STALE);
