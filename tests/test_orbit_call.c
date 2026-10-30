@@ -161,8 +161,8 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
     };
     const cflow_machine_action actions[] = {
         {300u, &cmeta_type_int, 100u, &cmeta_type_uint64,
-         &cmeta_type_int, CMETA_EFFECT_MAY_FAIL,
-         CMETA_PROP_DETERMINISTIC | CMETA_PROP_NO_ALIAS,
+         &cmeta_type_int, CMETA_EFFECT_STATEFUL | CMETA_EFFECT_MAY_FAIL,
+         CMETA_PROP_NO_ALIAS,
          CFLOW_MACHINE_ACTION_VALUE, &cmeta_type_uint64, 0u}
     };
     const cflow_machine_transition transitions[] = {
