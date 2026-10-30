@@ -227,7 +227,15 @@ int main(void) {
                                       &fixture.service_config);
     CHECK(spawn_result.status == ORBIT_SERVICE_OK);
     CHECK(spawn_result.actor_status == CFLOW_ACTOR_OK);
+    CHECK(fixture.service.methods != fixture.methods);
+    CHECK(fixture.service.catalog != NULL);
     CHECK(orbit_service_ref_acquire(&fixture.service, &ref));
+    /*
+     * The original input catalog is NOT a lifetime dependency. Deliberately
+     * overwrite its rows after successful spawn; the Core-owned immutable
+     * snapshot and independently retained producer refs must still work.
+     */
+    memset(fixture.methods, 0, sizeof(fixture.methods));
     CHECK(orbit_service_ref_retain(&ref, &retained));
 
     CHECK(orbit_service_ref_try_send(&ref, 0u, &input) ==
@@ -284,7 +292,8 @@ int main(void) {
     orbit_service_ref_release(&retained);
     orbit_service_ref_release(&ref);
     CHECK(retained.actor.impl == NULL && retained.methods == NULL);
-    CHECK(ref.actor.impl == NULL && ref.methods == NULL);
+    CHECK(ref.actor.impl == NULL && ref.methods == NULL &&
+          ref.catalog == NULL);
 
     fixture_destroy(&fixture);
     return 0;
