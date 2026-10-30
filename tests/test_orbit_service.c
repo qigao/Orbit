@@ -165,6 +165,7 @@ int main(void) {
         orbit_service_config bad = fixture.service_config;
         orbit_service_method wrong = {10u, 100u, &cmeta_type_bool, ORBIT_METHOD_SEND};
         bad.methods = &wrong;
+        bad.method_count = 1u;
         spawn_result = orbit_service_spawn(&fixture.service, &bad);
         CHECK(spawn_result.status == ORBIT_SERVICE_INVALID_METHOD);
         CHECK(fixture.service.actor.impl == NULL);
@@ -199,6 +200,17 @@ int main(void) {
         CHECK(spawn_result.status == ORBIT_SERVICE_INVALID_METHOD);
     }
 
+    /* Unknown method flags must be rejected before Actor publication. */
+    {
+        orbit_service_config bad = fixture.service_config;
+        orbit_service_method unknown_flags[2] = {
+            {10u, 100u, &cmeta_type_int, UINT32_C(2)},
+            {20u, 101u, &cmeta_type_int, ORBIT_METHOD_SEND}
+        };
+        bad.methods = unknown_flags;
+        spawn_result = orbit_service_spawn(&fixture.service, &bad);
+        CHECK(spawn_result.status == ORBIT_SERVICE_INVALID_METHOD);
+    }
     /* CALL_TOKEN is an explicit uint64-only kind, not a magic Event cast. */
     {
         orbit_service_config bad = fixture.service_config;
