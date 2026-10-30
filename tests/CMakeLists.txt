@@ -15,4 +15,10 @@ if(ORBIT_BUILD_ACE)
   target_compile_features(orbit_scope_native_test PRIVATE c_std_11)
   target_link_libraries(orbit_scope_native_test PRIVATE Orbit::ACE)
   add_test(NAME orbit.ace.scope_native COMMAND orbit_scope_native_test)
+
+  # Actual static ComponentProvider + ServiceHost N -> N+1 + CFlow Actor/Call.
+  add_executable(orbit_scope_provider_native_test test_orbit_scope_provider.c)
+  target_compile_features(orbit_scope_provider_native_test PRIVATE c_std_11)
+  target_link_libraries(orbit_scope_provider_native_test PRIVATE Orbit::ACE)
+  add_test(NAME orbit.ace.provider_native COMMAND orbit_scope_provider_native_test)
 endif()
