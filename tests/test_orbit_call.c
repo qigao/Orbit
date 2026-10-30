@@ -65,7 +65,7 @@ static bool call_action(void *user, const void *state, const void *event,
         out_state == NULL || out_observation == NULL || out_error == NULL)
         return false;
 
-    status = orbit_call_u64_request(&fixture->calls, token, &request);
+    status = orbit_call_u64_request(&fixture->calls, token, 10u, &request);
     if (status == ORBIT_CALL_OK) {
         /* This handler is executed by the REAL CFlow Machine/Actor owner. */
         atomic_fetch_add(&fixture->probe.action_executions, 1);
@@ -77,7 +77,7 @@ static bool call_action(void *user, const void *state, const void *event,
             CHECK(atomic_load(&fixture->probe.release_action));
         }
         status = orbit_call_u64_stage_reply(
-            &fixture->calls, token,
+            &fixture->calls, token, 10u,
             request == 999u ? 17 : 0, request + 1u);
         CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
     } else {
@@ -262,7 +262,7 @@ static void test_mailbox_rejection_and_postcommit(void) {
     CHECK(atomic_load(&f.probe.latest_response) == 42u);
     CHECK(atomic_load(&f.probe.action_executions) == 1);
     CHECK(orbit_call_u64_observe(&f.calls, token) == ORBIT_CALL_STALE);
-    CHECK(orbit_call_u64_stage_reply(&f.calls, token, 0, 10u) ==
+    CHECK(orbit_call_u64_stage_reply(&f.calls, token, 10u, 0, 10u) ==
           ORBIT_CALL_STALE);
 
     CHECK(orbit_call_port_get_stats(&f.calls, &stats));
@@ -290,7 +290,7 @@ static void test_cancel_credit_reuse(void) {
     CHECK(third == 0u);
     CHECK(orbit_call_u64_cancel(&f.calls, first) == ORBIT_CALL_OK);
     CHECK(atomic_load(&f.probe.cancelled) == 1);
-    CHECK(orbit_call_u64_request(&f.calls, first, &third) == ORBIT_CALL_STALE);
+    CHECK(orbit_call_u64_request(&f.calls, first, 10u, &third) == ORBIT_CALL_STALE);
     fixture_drive_until(&f, &f.probe.callback_count, 2);
     CHECK(atomic_load(&f.probe.successes) == 0);
     CHECK(atomic_load(&f.probe.application_errors) == 1);
@@ -301,7 +301,7 @@ static void test_cancel_credit_reuse(void) {
         &f.calls, &f.ref, 10u, 7u, call_terminal,
         &f.probe, &third, &send) == ORBIT_CALL_OK);
     CHECK(third != first);
-    CHECK(orbit_call_u64_stage_reply(&f.calls, first, 0, 111u) ==
+    CHECK(orbit_call_u64_stage_reply(&f.calls, first, 10u, 0, 111u) ==
           ORBIT_CALL_STALE);
     fixture_drive_until(&f, &f.probe.callback_count, 3);
     CHECK(atomic_load(&f.probe.successes) == 1);
@@ -329,7 +329,7 @@ static void test_close_and_stale_terminal(void) {
     CHECK(atomic_load(&f.probe.callback_count) == 1);
     CHECK(atomic_load(&f.probe.stopped) == 1);
     CHECK(orbit_call_u64_cancel(&f.calls, token) == ORBIT_CALL_STALE);
-    CHECK(orbit_call_u64_stage_reply(&f.calls, token, 0, 50u) ==
+    CHECK(orbit_call_u64_stage_reply(&f.calls, token, 10u, 0, 50u) ==
           ORBIT_CALL_STALE);
     CHECK(orbit_call_u64_async(
         &f.calls, &f.ref, 10u, 1u, call_terminal,
@@ -399,7 +399,7 @@ static void test_cancel_during_real_actor_action(void) {
     fixture_drive_until(&f, &f.probe.observed, 1);
     CHECK(atomic_load(&f.probe.callback_count) == 1);
     CHECK(atomic_load(&f.probe.successes) == 0);
-    CHECK(orbit_call_u64_stage_reply(&f.calls, token, 0, 72u) ==
+    CHECK(orbit_call_u64_stage_reply(&f.calls, token, 10u, 0, 72u) ==
           ORBIT_CALL_STALE);
     fixture_destroy(&f);
 }
