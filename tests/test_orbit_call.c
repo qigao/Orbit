@@ -60,11 +60,12 @@ static bool call_action(void *user, const void *state, const void *event,
                         void *out_state, void *out_observation,
                         const char **out_error) {
     call_fixture *fixture = (call_fixture *)user;
-    const uint64_t token = *(const uint64_t *)event;
+    uint64_t token;
 
     if (fixture == NULL || state == NULL || event == NULL ||
         out_state == NULL || out_observation == NULL || out_error == NULL)
         return false;
+    token = *(const uint64_t *)event;
 
     /*
      * CFlow Machine Actions REQUIRE DETERMINISTIC | NO_ALIAS. Therefore
@@ -93,11 +94,12 @@ static bool call_observe(void *user, const cmeta_type_desc *type,
     call_fixture *fixture = (call_fixture *)user;
     orbit_call_status status;
     uint64_t request = 0u;
-    const uint64_t token = *(const uint64_t *)value;
+    uint64_t token;
 
     CHECK(fixture != NULL);
     CHECK(value != NULL);
     CHECK(cmeta_type_equal(type, &cmeta_type_uint64));
+    token = *(const uint64_t *)value;
 
     /*
      * This CFlow Subscriber is invoked AFTER the Machine transition commit.
@@ -189,7 +191,7 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
     };
     const cflow_machine_action actions[] = {
         {300u, &cmeta_type_int, 100u, &cmeta_type_uint64,
-         &cmeta_type_int, CMETA_EFFECT_PURE,
+         &cmeta_type_int, CMETA_EFFECT_STATEFUL,
          CMETA_PROP_DETERMINISTIC | CMETA_PROP_NO_ALIAS,
          CFLOW_MACHINE_ACTION_VALUE, &cmeta_type_uint64, 0u}
     };
