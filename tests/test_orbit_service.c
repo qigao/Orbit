@@ -34,8 +34,8 @@ typedef struct service_fixture {
     cflow_executor executor;
     cflow_scheduler scheduler;
     orbit_service service;
-    orbit_service_method methods[1];
-    cflow_machine_action_binding action_binding;
+    orbit_service_method methods[2];
+    cflow_machine_action_binding action_bindings[2];
     cflow_actor_config actor_config;
     orbit_service_config service_config;
     service_probe probe;
@@ -84,19 +84,24 @@ static void fixture_prepare(service_fixture *fixture) {
         {10u, &cmeta_type_int, CFLOW_MACHINE_STATE_ACTIVE}
     };
     const cflow_event_type events[] = {
-        {100u, &cmeta_type_int}
+        {100u, &cmeta_type_int},
+        {101u, &cmeta_type_int}
     };
     const cflow_machine_action actions[] = {
         {300u, &cmeta_type_int, 100u, &cmeta_type_int, &cmeta_type_int,
          CMETA_EFFECT_MAY_FAIL, CMETA_PROP_DETERMINISTIC | CMETA_PROP_NO_ALIAS,
+         CFLOW_MACHINE_ACTION_VALUE, &cmeta_type_int, 0u},
+        {301u, &cmeta_type_int, 101u, &cmeta_type_int, &cmeta_type_int,
+         CMETA_EFFECT_MAY_FAIL, CMETA_PROP_DETERMINISTIC | CMETA_PROP_NO_ALIAS,
          CFLOW_MACHINE_ACTION_VALUE, &cmeta_type_int, 0u}
     };
     const cflow_machine_transition transitions[] = {
-        {10u, 100u, 0u, 300u, 10u, 1u}
+        {10u, 100u, 0u, 300u, 10u, 1u},
+        {10u, 101u, 0u, 301u, 10u, 1u}
     };
     const cflow_machine_definition definition = {
-        states, 1u, 10u, events, 1u, NULL, 0u,
-        actions, 1u, transitions, 1u
+        states, 1u, 10u, events, 2u, NULL, 0u,
+        actions, 2u, transitions, 2u
     };
     memset(fixture, 0, sizeof(*fixture));
     atomic_init(&fixture->probe.executed, 0);
@@ -112,12 +117,15 @@ static void fixture_prepare(service_fixture *fixture) {
     CHECK(cflow_scheduler_owner_bind(&fixture->scheduler,
                                       &fixture->executor, 32u));
 
-    fixture->action_binding = (cflow_machine_action_binding){
+    fixture->action_bindings[0] = (cflow_machine_action_binding){
         300u, service_action, &fixture->probe
+    };
+    fixture->action_bindings[1] = (cflow_machine_action_binding){
+        301u, service_action, &fixture->probe
     };
     fixture->actor_config.machine = (cflow_machine_instance_config){
         &fixture->machine, &fixture->initial_state, &cmeta_type_int,
-        NULL, 0u, &fixture->action_binding, 1u, 1u, &fixture->executor
+        NULL, 0u, fixture->action_bindings, 2u, 1u, &fixture->executor
     };
     fixture->actor_config.scheduler = &fixture->scheduler;
     fixture->actor_config.callbacks = (cflow_subscriber_callbacks){
@@ -126,8 +134,11 @@ static void fixture_prepare(service_fixture *fixture) {
     fixture->methods[0] = (orbit_service_method){
         10u, 100u, &cmeta_type_int
     };
+    fixture->methods[1] = (orbit_service_method){
+        20u, 101u, &cmeta_type_int
+    };
     fixture->service_config = (orbit_service_config){
-        &fixture->actor_config, fixture->methods, 1u
+        &fixture->actor_config, fixture->methods, 2u
     };
 }
 
@@ -165,6 +176,29 @@ int main(void) {
         CHECK(spawn_result.status == ORBIT_SERVICE_INVALID_METHOD);
     }
 
+    /* One Event may not serve two logical method IDs: dispatch would be ambiguous. */
+    {
+        orbit_service_config bad = fixture.service_config;
+        orbit_service_method ambiguous[2] = {
+            {10u, 100u, &cmeta_type_int},
+            {20u, 100u, &cmeta_type_int}
+        };
+        bad.methods = ambiguous;
+        spawn_result = orbit_service_spawn(&fixture.service, &bad);
+        CHECK(spawn_result.status == ORBIT_SERVICE_INVALID_METHOD);
+    }
+    /* Service method IDs must have one canonical ascending order. */
+    {
+        orbit_service_config bad = fixture.service_config;
+        orbit_service_method unsorted[2] = {
+            {20u, 101u, &cmeta_type_int},
+            {10u, 100u, &cmeta_type_int}
+        };
+        bad.methods = unsorted;
+        spawn_result = orbit_service_spawn(&fixture.service, &bad);
+        CHECK(spawn_result.status == ORBIT_SERVICE_INVALID_METHOD);
+    }
+
     spawn_result = orbit_service_spawn(&fixture.service,
                                       &fixture.service_config);
     CHECK(spawn_result.status == ORBIT_SERVICE_OK);
@@ -192,9 +226,19 @@ int main(void) {
     CHECK(atomic_load(&fixture.probe.executed) == 1);
     CHECK(atomic_load(&fixture.probe.last) == 42);
     CHECK(atomic_load(&fixture.probe.errors) == 0);
+    /* A second method has a different Event ID but the SAME CFlow mailbox. */
+    input = 75;
+    CHECK(orbit_service_ref_try_send(&retained, 20u, &input) ==
+          CFLOW_ACTOR_SEND_ACCEPTED);
+    attempts = 0u;
+    while (atomic_load(&fixture.probe.observed) < 2 && attempts++ < 512u)
+        (void)cflow_executor_run_one(&fixture.executor);
+    CHECK(atomic_load(&fixture.probe.observed) == 2);
+    CHECK(atomic_load(&fixture.probe.executed) == 2);
+    CHECK(atomic_load(&fixture.probe.last) == 75);
     CHECK(orbit_service_get_stats(&fixture.service, &stats));
-    CHECK(stats.machine.accepted == 1u);
-    CHECK(stats.machine.completed == 1u);
+    CHECK(stats.machine.accepted == 2u);
+    CHECK(stats.machine.completed == 2u);
 
     CHECK(orbit_service_request_stop(&fixture.service) == CFLOW_ACTOR_OK);
     attempts = 0u;
