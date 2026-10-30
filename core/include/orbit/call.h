@@ -94,9 +94,12 @@ typedef struct orbit_call_port_stats {
 /*
  * Exactly capacity bounded slots, one Salts Platform mutex and no data-path
  * allocations. capacity is in [1, UINT32_MAX]; token generation never wraps.
- * port must be zero-initialized; do not copy or move it while live.
+ * Port borrows one address-stable, already-spawned Orbit Service owner;
+ * it rejects other Service producer refs and MUST outlive that owner's
+ * cflow_actor_destroy. port must be zero-initialized; do not copy or move it.
  */
-orbit_call_status orbit_call_port_init(orbit_call_port *port, size_t capacity);
+orbit_call_status orbit_call_port_init(
+    orbit_call_port *port, const orbit_service *owner, size_t capacity);
 
 /*
  * Admit a scalar call. out_token is reset to zero on rejection. A SUCCESS
@@ -166,6 +169,8 @@ bool orbit_call_port_get_stats(
  * Non-blocking destruction, BUSY while an admission/callback/close remains.
  * The caller MUST have already destroyed/quiesced the CFlow Actor and stopped
  * ALL other API users, including producers and any callback provider.
+ * Destroy returns BUSY until the bound Orbit Service's CFlow Actor handle
+ * is actually destroyed; a mere call-port close is not actor quiescence.
  * This does not unload/retain a Plugin; keep its ServiceHost Scope alive
  * through Actor and call-port destruction, then release the Scope.
  */
