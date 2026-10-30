@@ -4,7 +4,10 @@
 
 Orbit is the **application-facing service composition layer** for the Salts ecosystem. Its goal is to make a native service as straightforward to create, send to, call and observe as a Skynet service—without duplicating the runtimes that already exist.
 
-> **Status: architecture/bootstrap. No Orbit runtime implementation or CI qualification yet.**
+> **Status:** M0a source exists on this Draft branch: a native `Salts::CFlow`
+> `spawn/try_send/stop` adapter and in-repo test. It is **not yet compiled,
+> linked or CI-qualified** against a real Salts 3 SDK. `call/reply`, generated
+> IDL stubs and cluster features are still pending.
 
 ## Architectural rule
 
@@ -58,3 +61,16 @@ Architecture details and API contracts are developed in Draft PRs and tracked in
 ## Upstreams
 
 [Salts](https://github.com/qigao/salts) · [SaltsUtils](https://github.com/qigao/salts-utils) · [SaltsCore](https://github.com/qigao/salts-core) · [CHttp](https://github.com/qigao/chttp) · [FlowMQ](https://github.com/qigao/flowmq) · [TurboRaft](https://github.com/qigao/turboraft) · [TurboDB](https://github.com/qigao/turbodb) · [Skynet](https://github.com/cloudwu/skynet)
+
+
+## Local M0a source (Draft)
+
+The current first implementation slice lives under `core/` and uses
+`Orbit::Core`, a static target requiring the actual installed
+`Salts::CFlow` SDK. See [M0 source admission and missing gates](docs/M0_ADMISSION.md).
+
+The native test `orbit.core.native` uses the existing CFlow Machine Actor
+and owner Executor/Scheduler. No new runtime worker, mailbox, transport or
+CI probe has been added. These sources do not yet support unary call/reply or
+IDL generation and must not be merged/released based solely on the tests'
+existence.
