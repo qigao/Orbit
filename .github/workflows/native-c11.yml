@@ -107,7 +107,44 @@ jobs:
               "-DCMAKE_PREFIX_PATH=$sdk" \
               -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=ON
             cmake --build "_build/orbit-$mode" --parallel 2
-            ctest --test-dir "_build/orbit-$mode" -N | grep -q '^Total Tests: 3$'
+            ctest --test-dir "_build/orbit-$mode" -N | grep -q '^Total Tests: 4
+            ctest --test-dir "_build/orbit-$mode" \
+              --no-tests=error --output-on-failure --timeout 120
+          done
+
+      - name: Confirm opt-out standalone Core has no mandatory ACE target
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="$RUNNER_TEMP/salts-3.0;$RUNNER_TEMP/saltscore-0.1"
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/saltscore-0.1/lib:${LD_LIBRARY_PATH:-}"
+          cmake -S . -B _build/orbit-core-only -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            "-DCMAKE_PREFIX_PATH=$sdk" \
+            -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=OFF
+          cmake --build _build/orbit-core-only --parallel 2
+          ctest --test-dir _build/orbit-core-only -N | grep -q '^Total Tests: 2$'
+          ctest --test-dir _build/orbit-core-only \
+            --no-tests=error --output-on-failure --timeout 120
+
+      - name: Report compiler cache statistics
+        if: always()
+        shell: bash
+        run: |
+          if command -v ccache >/dev/null 2>&1; then ccache --show-stats; fi
+
+      - name: Retain actual native CTest diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: orbit-native-c11-${{ github.run_id }}
+          path: |
+            _build/orbit-Debug/Testing/Temporary/LastTest.log
+            _build/orbit-Release/Testing/Temporary/LastTest.log
+            _build/orbit-core-only/Testing/Temporary/LastTest.log
+          if-no-files-found: warn
+          retention-days: 7
+
             ctest --test-dir "_build/orbit-$mode" \
               --no-tests=error --output-on-failure --timeout 120
           done
