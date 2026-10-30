@@ -207,7 +207,6 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
     atomic_init(&fixture->probe.block_action, false);
     atomic_init(&fixture->probe.action_entered, false);
     atomic_init(&fixture->probe.release_action, false);
-    CHECK(orbit_call_port_init(&fixture->calls, call_capacity) == ORBIT_CALL_OK);
     CHECK(cflow_machine_build(&fixture->machine, &definition) == CFLOW_MACHINE_OK);
     CHECK(cflow_executor_owner_init_with_capacity(
         &fixture->executor, 64u, NULL, NULL));
@@ -234,6 +233,8 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
     };
     CHECK(orbit_service_spawn(&fixture->service, &fixture->service_config)
           .status == ORBIT_SERVICE_OK);
+    CHECK(orbit_call_port_init(
+        &fixture->calls, &fixture->service, call_capacity) == ORBIT_CALL_OK);
     CHECK(orbit_service_ref_acquire(&fixture->service, &fixture->ref));
 }
 
