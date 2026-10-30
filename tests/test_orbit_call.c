@@ -5,6 +5,7 @@
 #include <cflow/machine.h>
 #include <cflow/scheduler.h>
 #include <cmeta/cmeta.h>
+#include <salts/thread.h>
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -32,6 +33,9 @@ typedef struct call_probe {
     atomic_int callback_count;
     atomic_uint_fast64_t latest_response;
     atomic_uint_fast64_t latest_token;
+    atomic_bool block_action;
+    atomic_bool action_entered;
+    atomic_bool release_action;
 } call_probe;
 
 typedef struct call_fixture {
@@ -65,6 +69,13 @@ static bool call_action(void *user, const void *state, const void *event,
     if (status == ORBIT_CALL_OK) {
         /* This handler is executed by the REAL CFlow Machine/Actor owner. */
         atomic_fetch_add(&fixture->probe.action_executions, 1);
+        if (atomic_load(&fixture->probe.block_action)) {
+            size_t checks = 0u;
+            atomic_store(&fixture->probe.action_entered, true);
+            while (!atomic_load(&fixture->probe.release_action) && checks++ < 5000u)
+                cmeta_sleep_ms(1u);
+            CHECK(atomic_load(&fixture->probe.release_action));
+        }
         status = orbit_call_u64_stage_reply(
             &fixture->calls, token,
             request == 999u ? 17 : 0, request + 1u);
@@ -162,6 +173,9 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
         actions, 1u, transitions, 1u
     };
     memset(fixture, 0, sizeof(*fixture));
+    atomic_init(&fixture->probe.block_action, false);
+    atomic_init(&fixture->probe.action_entered, false);
+    atomic_init(&fixture->probe.release_action, false);
     CHECK(orbit_call_port_init(&fixture->calls, call_capacity) == ORBIT_CALL_OK);
     CHECK(cflow_machine_build(&fixture->machine, &definition) == CFLOW_MACHINE_OK);
     CHECK(cflow_executor_owner_init_with_capacity(
@@ -329,9 +343,71 @@ static void test_close_and_stale_terminal(void) {
     fixture_destroy(&f);
 }
 
+typedef struct cancel_during_action_context {
+    orbit_call_port *port;
+    call_probe *probe;
+    uint64_t token;
+    atomic_int result;
+} cancel_during_action_context;
+
+static void cancel_while_actor_executing(void *user) {
+    cancel_during_action_context *ctx = (cancel_during_action_context *)user;
+    size_t checks = 0u;
+    while (!atomic_load(&ctx->probe->action_entered) && checks++ < 5000u)
+        cmeta_sleep_ms(1u);
+    if (!atomic_load(&ctx->probe->action_entered)) {
+        atomic_store(&ctx->result, ORBIT_CALL_BUSY);
+        atomic_store(&ctx->probe->release_action, true);
+        return;
+    }
+    atomic_store(&ctx->result, (int)orbit_call_u64_cancel(
+        ctx->port, ctx->token));
+    atomic_store(&ctx->probe->release_action, true);
+}
+
+static void test_cancel_during_real_actor_action(void) {
+    call_fixture f;
+    cancel_during_action_context ctx;
+    cmeta_thread_t thread = NULL;
+    uint64_t token = 0u;
+    cflow_actor_send_status send;
+    size_t rounds = 0u;
+
+    fixture_prepare(&f, 1u, 1u);
+    atomic_store(&f.probe.block_action, true);
+    CHECK(orbit_call_u64_async(
+        &f.calls, &f.ref, 10u, 71u, call_terminal,
+        &f.probe, &token, &send) == ORBIT_CALL_OK);
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.port = &f.calls;
+    ctx.probe = &f.probe;
+    ctx.token = token;
+    atomic_init(&ctx.result, ORBIT_CALL_BUSY);
+    CHECK(cmeta_thread_create(
+        &thread, cancel_while_actor_executing, &ctx) == 0);
+
+    /* The fixed CFlow owner executes the action. Another native thread
+     * cancels the call while the action is already in flight.
+     */
+    while (!atomic_load(&f.probe.action_entered) && rounds++ < 512u)
+        (void)cflow_executor_run_one(&f.executor);
+    CHECK(cmeta_thread_join(&thread) == 0);
+    CHECK(atomic_load(&ctx.result) == ORBIT_CALL_OK);
+    CHECK(atomic_load(&f.probe.cancelled) == 1);
+    CHECK(atomic_load(&f.probe.action_executions) == 1);
+
+    fixture_drive_until(&f, &f.probe.observed, 1);
+    CHECK(atomic_load(&f.probe.callback_count) == 1);
+    CHECK(atomic_load(&f.probe.successes) == 0);
+    CHECK(orbit_call_u64_stage_reply(&f.calls, token, 0, 72u) ==
+          ORBIT_CALL_STALE);
+    fixture_destroy(&f);
+}
+
 int main(void) {
     test_mailbox_rejection_and_postcommit();
     test_cancel_credit_reuse();
     test_close_and_stale_terminal();
+    test_cancel_during_real_actor_action();
     return 0;
 }
