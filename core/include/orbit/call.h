@@ -19,14 +19,18 @@ extern "C" {
  * copied by CFlow's own mailbox. The request/reply (u64 in this qualified
  * first slice) lives in ONE preallocated call slot, not a second message queue.
  *
- * CFlow action callbacks run before Machine transition commit:
- *   1. orbit_call_u64_request(token) copies the request.
- *   2. Business action computes and orbit_call_u64_stage_reply(token, ...).
- *   3. The action sets its uint64 observation to token.
- *   4. CFlow publishes that observation AFTER commit; ONLY THEN the actor's
- *      on_value callback calls orbit_call_u64_observe(token).
+ * The CFlow Machine Action must remain deterministic:
+ *   1. The Action copies the uint64 Event token to its observation, using
+ *      only declared Machine state + Event; it NEVER executes business work.
+ *   2. CFlow commits the state transition and publishes the observation.
+ *   3. In the Actor on_value callback AFTER commit, the typed adapter calls
+ *      orbit_call_u64_request(token, expected_method, ...), runs the native
+ *      business method, and calls orbit_call_u64_stage_reply(...).
+ *   4. That same callback calls orbit_call_u64_observe(token) to publish
+ *      exactly one local terminal result.
  *
- * A staged reply is NEVER a successful terminal. Cancel and stop race with
+ * A staged reply without a committed observation is NEVER a successful
+ * terminal. Cancel and stop race with
  * observation through one lock and each admitted call has at most one local
  * callback, including cancellation and failed local work. No retry, worker,
  * transport, scheduler, timer, or second Actor is created.
@@ -114,7 +118,9 @@ orbit_call_status orbit_call_u64_async(
     uint64_t *out_token, cflow_actor_send_status *out_send);
 
 /*
- * Actor action callbacks call these helpers on the existing CFlow owner.
+ * Generated business adapters call these helpers from the CFlow on_value
+ * observation callback, AFTER the Machine committed. The deterministic
+ * Machine action must not access the mutable call port or execute business.
  * Token must match both the generation AND the invoking method ID: a
  * wrong method cannot steal or settle another method's reply slot.
  * Cancelled/reused tokens return STALE; all operations copy scalars under
@@ -129,7 +135,8 @@ orbit_call_status orbit_call_u64_stage_reply(
 
 /*
  * Called ONLY from the CFlow Actor on_value observation callback (or an
- * equivalent authoritative post-commit observation). If no reply was staged,
+ * equivalent authoritative post-commit observation), AFTER the business
+ * adapter has staged an outcome. If no reply was staged,
  * settles with TERMINAL_NO_REPLY instead of silently leaking the call.
  * A stale token cannot affect a slot subsequently reused by another call.
  */
