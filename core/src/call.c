@@ -31,7 +31,14 @@ typedef struct orbit_call_slot {
 
 typedef struct orbit_call_impl {
     const orbit_service *owner; /* address-stable, borrowed until port destroy */
-    const void *actor_identity;  /* immutable CFlow producer control identity */
+    /*
+     * RETAIN a real CFlow producer reference while this port lives.
+     * Merely caching actor.impl would allow allocator-address reuse after
+     * the Actor owner was destroyed and all other refs were released.
+     * This pin keeps the CFlow control block (and its identity) alive.
+     */
+    cflow_actor_ref actor_pin;
+    const void *actor_identity;
     cmeta_mutex_t mutex;
     orbit_call_slot *slots;
     size_t capacity;
@@ -182,9 +189,15 @@ orbit_call_status orbit_call_port_init(
         free(impl);
         return ORBIT_CALL_ALLOCATION_FAILED;
     }
+    if (!cflow_actor_ref_acquire(&owner->actor, &impl->actor_pin)) {
+        cmeta_mutex_destroy(&impl->mutex);
+        free(impl->slots);
+        free(impl);
+        return ORBIT_CALL_INVALID_ARGUMENT;
+    }
     impl->capacity = capacity;
     impl->owner = owner;
-    impl->actor_identity = owner->actor.impl;
+    impl->actor_identity = impl->actor_pin.impl;
     impl->close_reason = ORBIT_CALL_TERMINAL_STOPPED;
     port->impl = impl;
     return ORBIT_CALL_OK;
@@ -475,6 +488,11 @@ orbit_call_status orbit_call_port_try_destroy(orbit_call_port *port) {
         }
     }
     cmeta_mutex_unlock(&impl->mutex);
+    /*
+     * Owner Actor is already destroyed and no submissions/callbacks remain.
+     * Release the retained upstream producer identity ONLY at this boundary.
+     */
+    cflow_actor_ref_release(&impl->actor_pin);
     cmeta_mutex_destroy(&impl->mutex);
     free(impl->slots);
     free(impl);
