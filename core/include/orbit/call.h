@@ -115,13 +115,16 @@ orbit_call_status orbit_call_u64_async(
 
 /*
  * Actor action callbacks call these helpers on the existing CFlow owner.
+ * Token must match both the generation AND the invoking method ID: a
+ * wrong method cannot steal or settle another method's reply slot.
  * Cancelled/reused tokens return STALE; all operations copy scalars under
  * the port mutex and never return raw borrowed slot storage.
  */
 orbit_call_status orbit_call_u64_request(
-    orbit_call_port *port, uint64_t token, uint64_t *out_request);
-orbit_call_status orbit_call_u64_stage_reply(
     orbit_call_port *port, uint64_t token,
+    orbit_method_id expected_method, uint64_t *out_request);
+orbit_call_status orbit_call_u64_stage_reply(
+    orbit_call_port *port, uint64_t token, orbit_method_id expected_method,
     int application_status, uint64_t response);
 
 /*
