@@ -555,11 +555,51 @@ static void test_terminal_callback_holds_credit(void) {
     fixture_destroy(&f);
 }
 
+/*
+ * A Call Port pins exactly one Actor AND exactly one immutable method table.
+ * A producer ref for a different live Actor or a forged catalog cannot
+ * claim that port's call credits or submit an Event.
+ */
+static void test_foreign_actor_and_catalog_rejected(void) {
+    call_fixture first;
+    call_fixture second;
+    orbit_service_ref forged = {0};
+    orbit_service_method foreign_methods[1] = {
+        {10u, 100u, &cmeta_type_uint64, ORBIT_METHOD_CALL_TOKEN}
+    };
+    uint64_t token = UINT64_MAX;
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_ACCEPTED;
+
+    fixture_prepare(&first, 2u, 2u);
+    fixture_prepare(&second, 2u, 2u);
+
+    CHECK(orbit_call_u64_async(
+        &first.calls, &second.ref, 10u, 55u, call_terminal,
+        &first.probe, &token, &send) == ORBIT_CALL_INVALID_ARGUMENT);
+    CHECK(token == 0u);
+    CHECK(send == CFLOW_ACTOR_SEND_INVALID_ARGUMENT);
+
+    CHECK(orbit_service_ref_retain(&first.ref, &forged));
+    /* A separate catalog—even with identical rows—is NOT the bound owner. */
+    forged.methods = foreign_methods;
+    token = UINT64_MAX;
+    CHECK(orbit_call_u64_async(
+        &first.calls, &forged, 10u, 65u, call_terminal,
+        &first.probe, &token, &send) == ORBIT_CALL_INVALID_ARGUMENT);
+    CHECK(token == 0u);
+    orbit_service_ref_release(&forged);
+    CHECK(atomic_load(&first.probe.callback_count) == 0);
+
+    fixture_destroy(&second);
+    fixture_destroy(&first);
+}
+
 int main(void) {
     test_mailbox_rejection_and_postcommit();
     test_cancel_credit_reuse();
     test_close_and_stale_terminal();
     test_cancel_during_real_actor_action();
     test_terminal_callback_holds_credit();
+    test_foreign_actor_and_catalog_rejected();
     return 0;
 }
