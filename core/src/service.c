@@ -3,6 +3,59 @@
 #include <cmeta/cmeta.h>
 #include <cmeta/type_traits.h>
 
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+/*
+ * One immutable catalog allocation per spawned Service. CFlow owns the
+ * Actor's independently retained control ref; this private catalog owner
+ * merely keeps the prebound method rows alive for late producer references.
+ * It neither owns an Executor/Mailbox nor retains any Plugin/Type provider.
+ */
+typedef struct orbit_method_catalog {
+    _Atomic size_t refs;
+    size_t count;
+    orbit_service_method methods[];
+} orbit_method_catalog;
+
+static orbit_method_catalog *orbit_catalog_create(
+    const orbit_service_method *methods, size_t count) {
+    orbit_method_catalog *catalog;
+    size_t bytes;
+    if (methods == NULL || count == 0u ||
+        count > (SIZE_MAX - sizeof(*catalog)) / sizeof(*methods))
+        return NULL;
+    bytes = sizeof(*catalog) + count * sizeof(*methods);
+    catalog = (orbit_method_catalog *)malloc(bytes);
+    if (catalog == NULL) return NULL;
+    atomic_init(&catalog->refs, 1u);
+    catalog->count = count;
+    memcpy(catalog->methods, methods, count * sizeof(*methods));
+    return catalog;
+}
+
+static bool orbit_catalog_retain(orbit_method_catalog *catalog) {
+    size_t count;
+    if (catalog == NULL) return false;
+    count = atomic_load_explicit(&catalog->refs, memory_order_relaxed);
+    while (count != 0u && count != SIZE_MAX) {
+        if (atomic_compare_exchange_weak_explicit(
+                &catalog->refs, &count, count + 1u,
+                memory_order_acquire, memory_order_relaxed))
+            return true;
+    }
+    return false;
+}
+
+static void orbit_catalog_release(orbit_method_catalog *catalog) {
+    if (catalog != NULL &&
+        atomic_fetch_sub_explicit(&catalog->refs, 1u,
+                                  memory_order_acq_rel) == 1u)
+        free(catalog);
+}
+
 static bool orbit_methods_valid(const orbit_service_config *config) {
     size_t i;
     size_t j;
@@ -62,13 +115,23 @@ orbit_service_spawn_result orbit_service_spawn(
     };
     cflow_actor_init_result actor_init;
     cflow_actor_status start_status;
+    orbit_method_catalog *catalog;
 
     if (service == NULL || config == NULL || service->actor.impl != NULL ||
         service->methods != NULL || service->method_count != 0u ||
-        config->actor == NULL)
+        service->catalog != NULL || config->actor == NULL)
         return result;
     if (!orbit_methods_valid(config)) {
         result.status = ORBIT_SERVICE_INVALID_METHOD;
+        return result;
+    }
+
+    /* Snapshot the validated immutable method rows BEFORE Actor publication.
+     * Source may reside in a generated header or transient application array.
+     */
+    catalog = orbit_catalog_create(config->methods, config->method_count);
+    if (catalog == NULL) {
+        result.status = ORBIT_SERVICE_ALLOCATION_FAILED;
         return result;
     }
 
@@ -76,6 +139,7 @@ orbit_service_spawn_result orbit_service_spawn(
     result.actor_status = actor_init.status;
     result.machine_status = actor_init.machine_status;
     if (actor_init.status != CFLOW_ACTOR_OK) {
+        orbit_catalog_release(catalog);
         result.status = ORBIT_SERVICE_ACTOR_INIT_REJECTED;
         return result;
     }
@@ -85,45 +149,69 @@ orbit_service_spawn_result orbit_service_spawn(
     if (start_status != CFLOW_ACTOR_OK) {
         /* CFlow alone owns the failed Actor's terminal/cleanup semantics. */
         cflow_actor_destroy(&service->actor);
+        orbit_catalog_release(catalog);
         result.status = ORBIT_SERVICE_ACTOR_START_REJECTED;
         return result;
     }
 
-    service->methods = config->methods;
-    service->method_count = config->method_count;
+    service->catalog = catalog;
+    service->methods = catalog->methods;
+    service->method_count = catalog->count;
     result.status = ORBIT_SERVICE_OK;
     return result;
 }
 
 bool orbit_service_ref_acquire(const orbit_service *service,
                                orbit_service_ref *out) {
+    orbit_method_catalog *catalog;
     if (service == NULL || out == NULL || service->actor.impl == NULL ||
-        service->methods == NULL || service->method_count == 0u ||
-        out->actor.impl != NULL || out->methods != NULL || out->method_count != 0u)
+        service->catalog == NULL || service->methods == NULL ||
+        service->method_count == 0u ||
+        out->actor.impl != NULL || out->methods != NULL ||
+        out->method_count != 0u || out->catalog != NULL)
         return false;
-    if (!cflow_actor_ref_acquire(&service->actor, &out->actor)) return false;
-    out->methods = service->methods;
-    out->method_count = service->method_count;
+    catalog = (orbit_method_catalog *)service->catalog;
+    if (!orbit_catalog_retain(catalog)) return false;
+    if (!cflow_actor_ref_acquire(&service->actor, &out->actor)) {
+        orbit_catalog_release(catalog);
+        return false;
+    }
+    out->catalog = catalog;
+    out->methods = catalog->methods;
+    out->method_count = catalog->count;
     return true;
 }
 
 bool orbit_service_ref_retain(const orbit_service_ref *ref,
                               orbit_service_ref *out) {
+    orbit_method_catalog *catalog;
     if (ref == NULL || out == NULL || ref->actor.impl == NULL ||
-        ref->methods == NULL || ref->method_count == 0u ||
-        out->actor.impl != NULL || out->methods != NULL || out->method_count != 0u)
+        ref->catalog == NULL || ref->methods == NULL ||
+        ref->method_count == 0u ||
+        out->actor.impl != NULL || out->methods != NULL ||
+        out->method_count != 0u || out->catalog != NULL)
         return false;
-    if (!cflow_actor_ref_retain(&ref->actor, &out->actor)) return false;
-    out->methods = ref->methods;
-    out->method_count = ref->method_count;
+    catalog = (orbit_method_catalog *)ref->catalog;
+    if (!orbit_catalog_retain(catalog)) return false;
+    if (!cflow_actor_ref_retain(&ref->actor, &out->actor)) {
+        orbit_catalog_release(catalog);
+        return false;
+    }
+    out->catalog = catalog;
+    out->methods = catalog->methods;
+    out->method_count = catalog->count;
     return true;
 }
 
 void orbit_service_ref_release(orbit_service_ref *ref) {
+    orbit_method_catalog *catalog;
     if (ref == NULL) return;
+    catalog = (orbit_method_catalog *)ref->catalog;
     cflow_actor_ref_release(&ref->actor);
+    ref->catalog = NULL;
     ref->methods = NULL;
     ref->method_count = 0u;
+    orbit_catalog_release(catalog);
 }
 
 cflow_actor_send_status orbit_service_ref_try_send(
@@ -178,8 +266,12 @@ bool orbit_service_get_stats(const orbit_service *service,
 }
 
 void orbit_service_destroy(orbit_service *service) {
+    orbit_method_catalog *catalog;
     if (service == NULL) return;
     cflow_actor_destroy(&service->actor);
+    catalog = (orbit_method_catalog *)service->catalog;
+    service->catalog = NULL;
     service->methods = NULL;
     service->method_count = 0u;
+    orbit_catalog_release(catalog);
 }
