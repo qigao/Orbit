@@ -226,7 +226,7 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
         call_observe, call_on_error, call_on_done, fixture
     };
     fixture->methods[0] = (orbit_service_method){
-        10u, 100u, &cmeta_type_uint64
+        10u, 100u, &cmeta_type_uint64, ORBIT_METHOD_CALL_TOKEN
     };
     fixture->service_config = (orbit_service_config){
         &fixture->actor_config, fixture->methods, 1u
@@ -236,6 +236,11 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
     CHECK(orbit_call_port_init(
         &fixture->calls, &fixture->service, call_capacity) == ORBIT_CALL_OK);
     CHECK(orbit_service_ref_acquire(&fixture->service, &fixture->ref));
+    {
+        const uint64_t forged_token = UINT64_C(1) << 32 | UINT64_C(1);
+        CHECK(orbit_service_ref_try_send(&fixture->ref, 10u, &forged_token)
+              == CFLOW_ACTOR_SEND_INVALID_ARGUMENT);
+    }
 }
 
 static void fixture_drive_until(
