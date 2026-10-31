@@ -157,3 +157,33 @@ boundary; it is not a claim of arbitrary nested managed graphs, every
 thread interleaving, TSan, Streaming, remote exactly-once, or persistent
 business COMMIT/ACK. Exact-head Linux/Windows native CTests remain the
 authority. Keep the new PR Draft until actual CI has run.
+
+
+## M0k.2d borrowed managed response callback versus close and FULL
+
+The managed N/N+1 ServiceHost lifecycle witness in M0k.2c proves a
+running business method cannot lose its execution borrow when local
+cancellation finishes. A separate safety boundary applies to a successful
+managed response while its terminal callback has started but not returned.
+
+The existing orbit.core.call_native holds an actual managed SUCCESS
+terminal callback open on its CFlow post-commit owner thread. A second
+real Salts native thread confirms:
+
+- callbacks_inflight=1, executing=0, occupied=1, completed_success=1.
+- While that borrowed owning response pointer is held, another attempt
+  on the capacity-one Port returns FULL with zero token and no callback.
+- The worker closes the original CallPort with STOPPED; close returns OK
+  and a further attempt returns CLOSED with zero token/no callback.
+- The response credit is still occupied and the callback remains active
+  even after close. The original callback reads the same owning binary
+  response again only after the worker has completed all the checks.
+- After callback return and only then, provider restore_zero may recycle
+  the response; total terminal accounting is exactly one SUCCESS and zero
+  additional STOPPED, old token STALE and no residual credits.
+
+This adds no production API, Actor, scheduler, runtime, Plugin loader,
+CTest executable, CI workflow or installer/consumer project. It uses the
+same test-local canonical CMeta BufferOps-v2 provider and Salts Platform
+thread API. It does not establish exhaustive scheduling, sanitizer/TSan,
+remote RPC, Streaming or business COMMIT/ACK.
