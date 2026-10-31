@@ -107,7 +107,7 @@ jobs:
               "-DCMAKE_PREFIX_PATH=$sdk" \
               -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=ON
             cmake --build "_build/orbit-$mode" --parallel 2
-            ctest --test-dir "_build/orbit-$mode" -N | grep -q '^Total Tests: 5$'
+            ctest --test-dir "_build/orbit-$mode" -N | grep -q '^Total Tests: 6$'
             ctest --test-dir "_build/orbit-$mode" \
               --no-tests=error --output-on-failure --timeout 120
           done
@@ -222,7 +222,7 @@ jobs:
             -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=ON
           cmake --build _build/orbit-ace --config Release --parallel 2
           ctest --test-dir _build/orbit-ace -C Release -N |
-            grep -q '^Total Tests: 5$'
+            grep -q '^Total Tests: 6$'
           ctest --test-dir _build/orbit-ace -C Release \
             --no-tests=error --output-on-failure --timeout 120
           cmake -S . -B _build/orbit-core-only -G 'Visual Studio 18 2026' -A x64 \
