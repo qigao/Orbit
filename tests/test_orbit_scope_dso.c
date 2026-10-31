@@ -9,10 +9,12 @@
 #include <cflow/executor.h>
 #include <cflow/scheduler.h>
 #include <cmeta/cmeta.h>
+#include <salts/thread.h>
 
 #define DATABIND_NATIVE_ENABLE_ORBIT 1
 #include "game.service_native.h"
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -120,6 +122,9 @@ typedef struct dso_actor {
     databind_4_Game_4_Room_4_Ping__orbit_context cancel_context;
     uint64_t first_result;
     unsigned cancelled;
+    atomic_bool hold_terminal;
+    atomic_bool terminal_entered;
+    atomic_bool release_terminal;
     int state;
     unsigned observed;
     unsigned callbacks;
@@ -184,6 +189,14 @@ static void dso_generated_ping_done(
     CHECK(application_status == 0);
     actor->first_result = response->ack;
     ++actor->callbacks;
+    if (atomic_load(&actor->hold_terminal)) {
+        size_t checks = 0u;
+        atomic_store(&actor->terminal_entered, true);
+        while (!atomic_load(&actor->release_terminal) &&
+               checks++ < 10000u)
+            cmeta_sleep_ms(1u);
+        CHECK(atomic_load(&actor->release_terminal));
+    }
 }
 
 static void dso_generated_pong_done(
@@ -237,6 +250,9 @@ static void dso_actor_start(dso_actor *actor, orbit_ace_scope_guard *scope) {
     orbit_service_config service_config;
 
     memset(actor, 0, sizeof(*actor));
+    atomic_init(&actor->hold_terminal, false);
+    atomic_init(&actor->terminal_entered, false);
+    atomic_init(&actor->release_terminal, false);
     CHECK(cflow_machine_build(&actor->machine, &definition) == CFLOW_MACHINE_OK);
     CHECK(cflow_executor_owner_init_with_capacity(
         &actor->executor, 64u, NULL, NULL));
@@ -301,6 +317,47 @@ static void dso_actor_stop(dso_actor *actor) {
     cflow_machine_destroy(&actor->machine);
 }
 
+
+/*
+ * An independent real native thread checks original ServiceHost Scope
+ * ownership while the generated N callback still holds its CallPort credit.
+ * Actor/port/guard destruction is serialized after this worker joins.
+ */
+typedef struct dso_live_terminal_probe {
+    dso_actor *actor;
+    orbit_ace_scope_guard *scope;
+    salts_service_host_runtime *runtime;
+    salts_service_host_generation *generation;
+    cmeta_plugin_registry *registry;
+    cmeta_plugin_ref plugin;
+    atomic_int proved_busy;
+} dso_live_terminal_probe;
+
+static void dso_check_live_terminal_scope(void *user) {
+    dso_live_terminal_probe *probe = (dso_live_terminal_probe *)user;
+    orbit_call_port_stats stats = {0};
+    salts_service_host_status exact = SALTS_SERVICE_HOST_OK;
+    size_t checks = 0u;
+
+    while (!atomic_load(&probe->actor->terminal_entered) &&
+           checks++ < 10000u)
+        cmeta_sleep_ms(1u);
+    CHECK(atomic_load(&probe->actor->terminal_entered));
+    CHECK(orbit_call_port_get_stats(&probe->actor->port, &stats));
+    CHECK(stats.admitted == 2u && stats.callbacks_inflight == 1u);
+    CHECK(stats.occupied == 2u && !stats.closed);
+    CHECK(orbit_ace_scope_guard_try_release(probe->scope, &exact) ==
+          ORBIT_ACE_SCOPE_BUSY);
+    CHECK(salts_service_host_generation_drain(
+        probe->runtime, probe->generation) == SALTS_SERVICE_HOST_BUSY);
+    CHECK(cmeta_plugin_registry_unload(
+        probe->registry, probe->plugin) == CMETA_PLUGIN_BUSY);
+    CHECK(orbit_ace_scope_guard_generation_id(probe->scope) ==
+          UINT64_C(21));
+    atomic_store(&probe->proved_busy, 1);
+    atomic_store(&probe->actor->release_terminal, true);
+}
+
 int main(void) {
     const cmeta_plugin_registry_config registry_config = {2u};
     cmeta_plugin_registry registry = {0};
@@ -316,6 +373,8 @@ int main(void) {
     salts_service_host_status exact = SALTS_SERVICE_HOST_OK;
     dso_actor actor;
     dso_actor successor_actor;
+    dso_live_terminal_probe live_terminal_probe = {0};
+    cmeta_thread_t live_terminal_thread = NULL;
     uint64_t successor_ping_token = 0u;
     uint64_t actor_token = 0u;
     cflow_actor_send_status actor_send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
@@ -379,6 +438,21 @@ int main(void) {
     CHECK(cmeta_plugin_registry_unload(
         &registry, original) == CMETA_PLUGIN_BUSY);
 
+    /* Block the first N generated Ping terminal until an independent thread
+     * proves Scope BUSY, generation drain BUSY and real Plugin unload BUSY.
+     */
+    live_terminal_probe.actor = &actor;
+    live_terminal_probe.scope = &old_scope;
+    live_terminal_probe.runtime = &runtime;
+    live_terminal_probe.generation = &n.generation;
+    live_terminal_probe.registry = &registry;
+    live_terminal_probe.plugin = original;
+    atomic_init(&live_terminal_probe.proved_busy, 0);
+    atomic_store(&actor.hold_terminal, true);
+    CHECK(cmeta_thread_create(
+        &live_terminal_thread, dso_check_live_terminal_scope,
+        &live_terminal_probe) == 0);
+
     /* The OLD dynamically loaded Provider is invoked inside the Actor's
      * real post-commit CFlow Subscriber after N+1 has been published.
      */
@@ -431,6 +505,9 @@ int main(void) {
         CHECK(successor_actor.last_result == UINT64_C(190));
         CHECK(actor.receiver.invocations == 2u);
         CHECK(successor_actor.receiver.invocations == 2u);
+        CHECK(cmeta_thread_join(&live_terminal_thread) == 0);
+        CHECK(atomic_load(&live_terminal_probe.proved_busy) == 1);
+        atomic_store(&actor.hold_terminal, false);
         CHECK(orbit_call_u64_observe(&actor.port, actor_token) ==
               ORBIT_CALL_STALE);
         CHECK(orbit_call_u64_observe(
