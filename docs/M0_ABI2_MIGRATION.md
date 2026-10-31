@@ -21,6 +21,16 @@ The ACE adapter calls `salts_service_host_abi_v2_0_required()` on Scope
 admission. An earlier host archive cannot silently satisfy this link. Core-only
 builds retain their original CFlow-only dependency graph.
 
+## Lifecycle admission and configuration borrows
+
+The pinned ACE implementation rejects lifecycle callback reentry while its
+Configurator is STARTING/STOPPING. Construction config_data and config_value
+expire after create() returns; Provider metadata and service views retain their
+separate generation/Scope lifetime. Publication validates the exclusively owned
+BUILT candidate outside runtime admission locking, then rechecks state/epoch
+before attachment. Drain reserves one STOPPING bundle before validation and
+teardown. These fixes retain native ABI 2.0 and the existing typed C functions.
+
 ## Existing executable path
 
 The same native CTests exercise:
@@ -42,7 +52,7 @@ discarded hand-written DSO adapter remains absent.
 
 | Input | Identity |
 | --- | --- |
-| Salts runtime | `48999ae4204fb88bce206945f324afa6dd4dc57d` — Salts 4.0 / ABI 2.0, ACE / Provider targets |
+| Salts runtime | `408c07803c84687653a7e2d1625c79a69d535f87` — Salts 4.0 / ABI 2.0, ACE / Provider targets |
 | Core runtime | `cfc1ed0d24364689b10ef7a85cff28d8776eb7db` — Core 0.1 |
 | Canonical host compiler | SaltsUtils `852b5cc741ef0debb1735b03e129bb30a136f038` |
 | Host artifact run | `41168655686`, Linux/Windows native SDKs |
