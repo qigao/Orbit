@@ -251,6 +251,32 @@ static bool actor_native_receiver_init(
     return true;
 }
 
+/* Test-only trusted initializer failures never publish an activation
+ * ticket, bind a Scope, or retain an extra Provider lease.
+ */
+static bool actor_reject_receiver_init(
+    void *user, const cmeta_interface_projection *projection,
+    void **out_receiver) {
+    (void)user;
+    (void)projection;
+    if (out_receiver) *out_receiver = NULL;
+    return false;
+}
+
+/* A Provider/application callback is external code and may close the exact
+ * CallPort. Activation MUST check admission a second time after callback.
+ */
+static bool actor_close_during_receiver_init(
+    void *user, const cmeta_interface_projection *projection,
+    void **out_receiver) {
+    actor_fixture *actor = (actor_fixture *)user;
+    if (!actor_native_receiver_init(user, projection, out_receiver))
+        return false;
+    CHECK(orbit_call_port_close(
+        &actor->calls, ORBIT_CALL_TERMINAL_STOPPED) == ORBIT_CALL_OK);
+    return true;
+}
+
 static void actor_prepare(actor_fixture *a, orbit_ace_scope_guard *guard,
                           bool bind_scope) {
     const cflow_machine_state states[] = {
@@ -484,6 +510,18 @@ static void test_scope_binding_requires_unused_live_port(void) {
         CHECK(attempted.source == NULL);
     }
 
+    /* The scoped CMeta initializer closes its own never-admitted Port
+     * while activation is in flight. No ticket may be published.
+     */
+    {
+        orbit_ace_native_activation attempted = {0};
+        CHECK(orbit_ace_scope_guard_activate_native(
+            &old_scope, &closed_actor.service, &closed_actor.calls,
+            orbit_test_value_interface(), actor_close_during_receiver_init,
+            &closed_actor, &attempted) ==
+              ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+        CHECK(attempted.source == NULL);
+    }
     /* No calls have been admitted; a CLOSED Port still cannot bind. */
     CHECK(orbit_call_port_close(
         &closed_actor.calls, ORBIT_CALL_TERMINAL_STOPPED) == ORBIT_CALL_OK);
@@ -497,6 +535,19 @@ static void test_scope_binding_requires_unused_live_port(void) {
             orbit_test_value_interface(), actor_native_receiver_init,
             &closed_actor, &attempted) ==
               ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+        CHECK(attempted.source == NULL);
+    }
+
+    /* A failing receiver factory leaves the same original Scope free
+     * to attempt activation again, not half-published or leaked.
+     */
+    {
+        orbit_ace_native_activation attempted = {&late_actor};
+        CHECK(orbit_ace_scope_guard_activate_native(
+            &next_scope, &late_actor.service, &late_actor.calls,
+            orbit_test_value_interface(), actor_reject_receiver_init,
+            &late_actor, &attempted) ==
+              ORBIT_ACE_SCOPE_RECEIVER_REJECTED);
         CHECK(attempted.source == NULL);
     }
 
