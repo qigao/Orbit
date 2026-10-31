@@ -1658,6 +1658,135 @@ static void test_owned_response_copy_fault_and_recovery(void) {
     fixture_destroy(&f);
 }
 
+
+/*
+ * M0k.2f: the SAME canonical CMeta BufferOps v2 owning provider deliberately
+ * reenters the original CallPort from its stage-response copy callback.
+ * The post-commit business borrow must remain pinned, both read-only stats
+ * and duplicate terminal requests must return rather than deadlock, and
+ * cancellation must deliver exactly one terminal with no late SUCCESS.
+ */
+static void test_owned_provider_copy_reentry_cancel(void) {
+    call_fixture f;
+    test_owned_reentry_context ctx = {0};
+    test_owned_bytes input = {0};
+    const unsigned char raw[] = {0u, 0xffu, 0x42u, 0x80u};
+    orbit_call_port_stats stats = {0};
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    uint64_t cancelled_token = 0u, success_token = 0u;
+
+    fixture_prepare_ex(&f, 2u, 1u, true);
+    ctx.port = &f.calls;
+    ctx.producer = &f.ref;
+    atomic_init(&ctx.hook_copy, false);
+    atomic_init(&ctx.hook_restore, false);
+    atomic_init(&ctx.copy_hits, 0);
+    atomic_init(&ctx.restore_hits, 0);
+    atomic_store(&test_owned_reentry_active, &ctx);
+    atomic_store(&f.probe.reenter_owned_stage_copy, true);
+
+    CHECK(test_owned_from(&input, raw, sizeof(raw), 32u));
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &input,
+        call_owned_terminal, &f.probe, &cancelled_token, &send) ==
+        ORBIT_CALL_OK);
+    CHECK(cancelled_token != 0u && send == CFLOW_ACTOR_SEND_ACCEPTED);
+    ctx.token = cancelled_token;
+    test_owned_destroy(&input);
+    fixture_drive_until(&f, &f.probe.observed, 1);
+    CHECK(atomic_load(&ctx.copy_hits) == 1);
+    CHECK(!atomic_load(&ctx.hook_copy));
+    CHECK(atomic_load(&f.probe.cancelled) == 1);
+    CHECK(atomic_load(&f.probe.successes) == 0);
+    CHECK(atomic_load(&f.probe.callback_count) == 1);
+    CHECK(atomic_load(&f.probe.business_executions) == 1);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.admitted == 1u && stats.cancelled == 1u);
+    CHECK(stats.occupied == 0u && stats.executing == 0u);
+    CHECK(stats.callbacks_inflight == 0u);
+    CHECK(orbit_call_u64_cancel(&f.calls, cancelled_token) ==
+          ORBIT_CALL_STALE);
+
+    /* The same physical slot can be reused ONLY after the old CMeta copy,
+     * terminal callback and execution borrow have all retired.
+     */
+    atomic_store(&f.probe.reenter_owned_stage_copy, false);
+    CHECK(test_owned_from(&input, raw, sizeof(raw), 32u));
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &input,
+        call_owned_terminal, &f.probe, &success_token, &send) ==
+        ORBIT_CALL_OK);
+    CHECK(success_token != 0u && success_token != cancelled_token);
+    test_owned_destroy(&input);
+    fixture_drive_until(&f, &f.probe.successes, 1);
+    CHECK(atomic_load(&f.probe.successes) == 1);
+    CHECK(atomic_load(&f.probe.callback_count) == 2);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.admitted == 2u && stats.cancelled == 1u);
+    CHECK(stats.completed_success == 1u && stats.occupied == 0u);
+    atomic_store(&test_owned_reentry_active, NULL);
+    fixture_destroy(&f);
+}
+
+/*
+ * Restoring an owned request/response after a SUCCESS callback is another
+ * external provider invocation. The slot stays RECLAIMING (occupied, token
+ * stale, and no callback credit) while its restore hook reenters get_stats,
+ * try_destroy and a capacity-one new admission. No Port mutex is held.
+ */
+static void test_owned_provider_restore_reentry_credit(void) {
+    call_fixture f;
+    test_owned_reentry_context ctx = {0};
+    test_owned_bytes input = {0};
+    const unsigned char raw[] = {0u, 0xffu, 0x42u, 0x80u};
+    orbit_call_port_stats stats = {0};
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    uint64_t first = 0u, next = 0u;
+
+    fixture_prepare_ex(&f, 2u, 1u, true);
+    ctx.port = &f.calls;
+    ctx.producer = &f.ref;
+    atomic_init(&ctx.hook_copy, false);
+    atomic_init(&ctx.hook_restore, false);
+    atomic_init(&ctx.copy_hits, 0);
+    atomic_init(&ctx.restore_hits, 0);
+    atomic_store(&test_owned_reentry_active, &ctx);
+    atomic_store(&f.probe.reenter_owned_restore, true);
+
+    CHECK(test_owned_from(&input, raw, sizeof(raw), 32u));
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &input,
+        call_owned_terminal, &f.probe, &first, &send) == ORBIT_CALL_OK);
+    CHECK(first != 0u && send == CFLOW_ACTOR_SEND_ACCEPTED);
+    test_owned_destroy(&input);
+    fixture_drive_until(&f, &f.probe.observed, 1);
+    CHECK(atomic_load(&ctx.restore_hits) == 1);
+    CHECK(!atomic_load(&ctx.hook_restore));
+    CHECK(atomic_load(&f.probe.successes) == 1);
+    CHECK(atomic_load(&f.probe.callback_count) == 1);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.occupied == 0u && stats.executing == 0u);
+    CHECK(stats.callbacks_inflight == 0u && stats.rejected_full == 1u);
+    CHECK(orbit_call_u64_cancel(&f.calls, first) == ORBIT_CALL_STALE);
+
+    atomic_store(&f.probe.reenter_owned_restore, false);
+    CHECK(test_owned_from(&input, raw, sizeof(raw), 32u));
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &input,
+        call_owned_terminal, &f.probe, &next, &send) == ORBIT_CALL_OK);
+    CHECK(next != 0u && next != first);
+    test_owned_destroy(&input);
+    fixture_drive_until(&f, &f.probe.successes, 2);
+    CHECK(atomic_load(&f.probe.successes) == 2);
+    CHECK(atomic_load(&f.probe.callback_count) == 2);
+    CHECK(atomic_load(&ctx.restore_hits) == 1);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.admitted == 2u && stats.completed_success == 2u);
+    CHECK(stats.occupied == 0u && stats.rejected_full == 1u);
+    atomic_store(&test_owned_reentry_active, NULL);
+    fixture_destroy(&f);
+}
+
 int main(void) {
     test_mailbox_rejection_and_postcommit();
     test_cancel_credit_reuse();
@@ -1670,6 +1799,8 @@ int main(void) {
     test_owned_execution_cancel_keeps_request();
     test_owned_callback_close_keeps_reply();
     test_owned_response_copy_fault_and_recovery();
+    test_owned_provider_copy_reentry_cancel();
+    test_owned_provider_restore_reentry_credit();
     test_concurrent_producers_and_terminals();
     test_concurrent_close_during_admission();
     return 0;
