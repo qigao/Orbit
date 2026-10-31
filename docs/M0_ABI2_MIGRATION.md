@@ -1,6 +1,6 @@
 ## CMeta package identity follow-up
 
-This branch builds the exact CMeta source `f47751dc5698122f057b27088a40b43948a8da18` from
+This branch builds the exact CMeta source `76dbead9c579f9124f2c66c838d0a32a8351e811` from
 [Salts #1337](https://github.com/qigao/salts/pull/1337), stacked on #1336.
 The GitHub repository remains qigao/salts until its separate manual rename.
 Consumers require `find_package(CMeta 4.0 CONFIG REQUIRED)` and link CMeta::
