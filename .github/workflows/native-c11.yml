@@ -97,7 +97,7 @@ jobs:
         with:
           name: salts-utils-qualified-sdk-linux-x64
           repository: qigao/salts-utils
-          run-id: 41168655686
+          run-id: 41172737727
           github-token: ${{ github.token }}
           path: _deps/saltsutils-idl-host
 
@@ -111,8 +111,8 @@ jobs:
           p = Path('_deps/saltsutils-idl-host')
           obj = json.loads((p / 'sdk-provenance.json').read_text())
           assert obj['repository'] == 'qigao/salts-utils', obj
-          assert obj['source_sha'] == '852b5cc741ef0debb1735b03e129bb30a136f038', obj
-          assert obj['run_id'] == '41168655686', obj
+          assert obj['source_sha'] == '12b6f30895b2b9d78a2cc0e76bbc1ef9b0abd798', obj
+          assert obj['run_id'] == '41172737727', obj
           assert obj['rid'] == 'linux-x64', obj
           PY
           # download-artifact does not preserve executable mode bits.
@@ -246,7 +246,7 @@ jobs:
         with:
           name: salts-utils-qualified-sdk-windows-x64
           repository: qigao/salts-utils
-          run-id: 41168655686
+          run-id: 41172737727
           github-token: ${{ github.token }}
           path: _deps/saltsutils-idl-host
 
@@ -257,8 +257,8 @@ jobs:
           $root = Join-Path $env:GITHUB_WORKSPACE '_deps/saltsutils-idl-host'
           $meta = Get-Content -LiteralPath (Join-Path $root 'sdk-provenance.json') -Raw | ConvertFrom-Json
           if ($meta.repository -ne 'qigao/salts-utils' -or
-              $meta.source_sha -ne '852b5cc741ef0debb1735b03e129bb30a136f038' -or
-              $meta.run_id -ne '41168655686' -or
+              $meta.source_sha -ne '12b6f30895b2b9d78a2cc0e76bbc1ef9b0abd798' -or
+              $meta.run_id -ne '41172737727' -or
               $meta.rid -ne 'windows-x64') {
             throw "Unexpected salts-idlc Windows SDK provenance: $($meta | ConvertTo-Json -Compress)"
           }

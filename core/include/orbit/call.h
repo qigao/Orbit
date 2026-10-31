@@ -2,6 +2,7 @@
 #define ORBIT_CALL_H
 
 #include <orbit/service.h>
+#include <cmeta/data.h>
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -54,7 +55,9 @@ typedef enum orbit_call_status {
     ORBIT_CALL_STALE,
     ORBIT_CALL_DUPLICATE,
     ORBIT_CALL_NO_REPLY,
-    ORBIT_CALL_BUSY
+    ORBIT_CALL_BUSY,
+    ORBIT_CALL_VALUE_TOO_LARGE,
+    ORBIT_CALL_VALUE_COPY_FAILED
 } orbit_call_status;
 
 typedef enum orbit_call_terminal {
@@ -83,6 +86,7 @@ typedef struct orbit_call_port_stats {
     size_t occupied;
     size_t admitting;
     size_t callbacks_inflight;
+    size_t executing; /* borrowed Native VALUE requests still in business */
     uint64_t admitted;
     uint64_t completed_success;
     uint64_t completed_error;
@@ -203,6 +207,92 @@ bool orbit_call_port_get_stats(
  * through Actor and call-port destruction, then release the Scope.
  */
 orbit_call_status orbit_call_port_try_destroy(orbit_call_port *port);
+
+
+/*
+ * M0k.2a bounded owning VALUE slice.
+ *
+ * The same Orbit CallPort and original CFlow CALL_TOKEN mailbox are used;
+ * the mailbox still carries ONLY the 64-bit generation token. The canonical
+ * CMeta DataDesc/Value providers own all copy/restore/semantic-zero behavior.
+ * No second handler ABI, queue, scheduler or implicit shadow serialization.
+ *
+ * This first slice binds ONE exact managed method at activation. The
+ * descriptor is borrowed until CallPort destruction and must be a canonical
+ * owning STRING/BYTES or a complete non-nested CMeta V2 VALUE STRUCT with
+ * only primitive and owning STRING/BYTES fields. Explicit max byte budgets
+ * exclude unknown/unbounded, VIEW, optional/nullable/nested/collection data.
+ * A caller must not mutate the source concurrently with admission.
+ */
+typedef struct orbit_call_value_contract {
+    orbit_method_id method;
+    const cmeta_data_desc *request;
+    const cmeta_data_desc *response;
+    size_t max_request_bytes;
+    size_t max_response_bytes;
+} orbit_call_value_contract;
+
+typedef void (*orbit_call_value_terminal_fn)(
+    void *user, uint64_t token, orbit_call_terminal terminal,
+    int application_status, const void *borrowed_response);
+
+/*
+ * Initialize an ordinary CallPort with one complete managed VALUE contract.
+ * All response-credit metadata and correctly aligned native VALUE storage
+ * are allocated during init; no new mailbox/owner is introduced.
+ * The descriptor provider, its callbacks and its original Plugin Scope
+ * MUST remain live through Actor + CallPort destruction.
+ */
+orbit_call_status orbit_call_port_init_value(
+    orbit_call_port *port, const orbit_service *owner, size_t capacity,
+    const orbit_call_value_contract *contract);
+
+/*
+ * Copy a request into the preallocated slot through the exact canonical
+ * CMeta VALUE provider, within max_request_bytes, before CFlow admission.
+ * On FULL/CLOSED/budget/copy/send rejection the caller retains all storage,
+ * out_token=0, and NO callback is delivered. CMeta copy failure is atomic:
+ * partial slot storage is restored to semantic zero.
+ *
+ * The call may be terminalled by cancel/close concurrently with the
+ * async return. This is a local terminal only; no application rollback.
+ */
+orbit_call_status orbit_call_value_async(
+    orbit_call_port *port, const orbit_service_ref *service,
+    orbit_method_id method, const void *request,
+    orbit_call_value_terminal_fn terminal, void *user,
+    uint64_t *out_token, cflow_actor_send_status *out_send);
+
+/*
+ * ONLY the CFlow post-commit owner may begin a managed request. The borrowed
+ * const pointer is owned by the slot; begin pins its execution lifetime
+ * independently of cancel/close terminal callbacks and slot reuse. Exactly
+ * one end is required even after STALE/cancel; never retain the pointer.
+ */
+orbit_call_status orbit_call_value_begin(
+    orbit_call_port *port, uint64_t token,
+    orbit_method_id expected_method, const void **out_request);
+
+/*
+ * Stage a deep-cloned response using the exact response DataDesc while the
+ * execution borrow is held. On error/stale the application still owns the
+ * supplied response and must clear it itself. Error responses may be NULL.
+ */
+orbit_call_status orbit_call_value_stage_reply(
+    orbit_call_port *port, uint64_t token, orbit_method_id expected_method,
+    int application_status, const void *response);
+
+/*
+ * Release one business borrow. Cancel/close may already have emitted the
+ * sole local terminal; this releases request/response only after both its
+ * execution borrow and terminal callback have retired.
+ */
+orbit_call_status orbit_call_value_end(
+    orbit_call_port *port, uint64_t token, orbit_method_id expected_method);
+
+/* Post-commit observation/terminal arbitration (same underlying Port). */
+orbit_call_status orbit_call_value_observe(
+    orbit_call_port *port, uint64_t token);
 
 #ifdef __cplusplus
 }
