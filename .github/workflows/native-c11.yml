@@ -162,6 +162,50 @@ jobs:
           ctest --test-dir _build/orbit-core-only \
             --no-tests=error --output-on-failure --timeout 120
 
+      # Fully instrument Core + CMeta + Orbit, not just the test executable.
+      # Use the original immutable sources and the same runner-native Clang.
+      - name: Run original owning CallPort tests under full-source Clang TSan
+        shell: bash
+        run: |
+          set -euo pipefail
+          flags="-fsanitize=thread -fno-omit-frame-pointer -g -O1"
+          core="$RUNNER_TEMP/saltscore-tsan"
+          cmeta="$RUNNER_TEMP/cmeta-tsan"
+          sdk="$cmeta;$core"
+          cmake -S _deps/salts-core -B _build/core-tsan -G Ninja \
+            "-DCMAKE_TOOLCHAIN_FILE=$QIGAO_COMPILER_TOOLCHAIN_FILE" \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF \
+            "-DCMAKE_C_FLAGS=$flags" \
+            "-DCMAKE_INSTALL_PREFIX=$core"
+          cmake --build _build/core-tsan --parallel 2
+          cmake --install _build/core-tsan
+
+          cmake -S _deps/salts -B _build/cmeta-tsan -G Ninja \
+            "-DCMAKE_TOOLCHAIN_FILE=$QIGAO_COMPILER_TOOLCHAIN_FILE" \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DBUILD_TESTING=OFF -DBUILD_TESTS=OFF \
+            -DBUILD_SHARED_LIBS=OFF -DBUILD_BENCHMARKS=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            "-DCMAKE_C_FLAGS=$flags" "-DCMAKE_CXX_FLAGS=$flags" \
+            "-DCMAKE_PREFIX_PATH=$core" \
+            "-DCMAKE_INSTALL_PREFIX=$cmeta"
+          cmake --build _build/cmeta-tsan --parallel 2
+          cmake --install _build/cmeta-tsan
+
+          export LD_LIBRARY_PATH="$core/lib"
+          export TSAN_OPTIONS="halt_on_error=1:exitcode=66"
+          cmake -S . -B _build/orbit-tsan -G Ninja \
+            "-DCMAKE_TOOLCHAIN_FILE=$QIGAO_COMPILER_TOOLCHAIN_FILE" \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            "-DCMAKE_C_FLAGS=$flags" "-DCMAKE_CXX_FLAGS=$flags" \
+            "-DCMAKE_PREFIX_PATH=$sdk" \
+            -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=ON \
+            -DORBIT_IDL_CONFORMANCE=ON \
+            "-DORBIT_IDL_SDK_ROOT=$GITHUB_WORKSPACE/_deps/saltsutils-idl-host"
+          cmake --build _build/orbit-tsan --parallel 2
+          ctest --test-dir _build/orbit-tsan \
+            --no-tests=error --output-on-failure --timeout 180
+
       - name: Report compiler cache statistics
         if: always()
         shell: bash
@@ -177,6 +221,7 @@ jobs:
             _build/orbit-Debug/Testing/Temporary/LastTest.log
             _build/orbit-Release/Testing/Temporary/LastTest.log
             _build/orbit-core-only/Testing/Temporary/LastTest.log
+            _build/orbit-tsan/Testing/Temporary/LastTest.log
           if-no-files-found: warn
           retention-days: 7
 
