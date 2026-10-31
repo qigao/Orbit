@@ -90,6 +90,6 @@ are tracked in [M0 ABI 2 migration](docs/M0_ABI2_MIGRATION.md).
 
 The CMeta package migration is stacked on the ACE/Provider target migration.
 It requires the exact source from [Salts #1337](https://github.com/qigao/salts/pull/1337)
-and shared LLVM setup from vcpkg-cache Draft #244. Its native CI rebuilds Core,
+and shared LLVM setup from vcpkg-cache@master (#244 merged). Its native CI rebuilds Core,
 CMeta and Orbit under the same toolchain; historical MSVC/GCC results do not
 qualify LLVM SDKs. See [the migration record](docs/M0_ABI2_MIGRATION.md).

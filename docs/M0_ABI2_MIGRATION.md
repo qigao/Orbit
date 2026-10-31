@@ -1,6 +1,6 @@
 ## CMeta package identity follow-up
 
-This branch builds the exact CMeta source `98a175f8b6c4d88d30a4875294a1adaafa7e830e` from
+This branch builds the exact CMeta source `f47751dc5698122f057b27088a40b43948a8da18` from
 [Salts #1337](https://github.com/qigao/salts/pull/1337), stacked on #1336.
 The GitHub repository remains qigao/salts until its separate manual rename.
 Consumers require `find_package(CMeta 4.0 CONFIG REQUIRED)` and link CMeta::
@@ -9,8 +9,10 @@ native/Provider/binding ABI contracts remain unchanged.
 
 Both existing native jobs select the same compiler for installed Core, CMeta
 and Orbit: runner-native Clang on Linux, llvm-mingw/UCRT 20261020 on Windows.
-The shared compiler actions pin vcpkg-cache Draft #244 at
-`971d5d11325d01edef423e1d039afaec0409b2fe`; this dependency is not on master.
+The shared compiler actions use vcpkg-cache@master after #244 merged.
+Core source is pinned to `287c30db125e1ada12d51bd17ba36cddd8302305` from Core #135,
+which qualifies explicit Platform DLL exports, real scheduler TLS and
+llvm-mingw TinyTest initialization in the existing native graph.
 No SDK publication or compiler/CRT cache relabeling is authorized by these
 source tests. The separate old salts-idlc executable remains a host process.
 

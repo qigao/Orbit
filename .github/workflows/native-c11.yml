@@ -36,7 +36,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: qigao/salts-core
-          ref: cfc1ed0d24364689b10ef7a85cff28d8776eb7db
+          ref: 287c30db125e1ada12d51bd17ba36cddd8302305
           path: _deps/salts-core
           persist-credentials: false
 
@@ -44,7 +44,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: qigao/salts
-          ref: 98a175f8b6c4d88d30a4875294a1adaafa7e830e
+          ref: f47751dc5698122f057b27088a40b43948a8da18
           path: _deps/salts
           persist-credentials: false
 
@@ -53,8 +53,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
-          test "$(git -C _deps/salts-core rev-parse HEAD)" = cfc1ed0d24364689b10ef7a85cff28d8776eb7db
-          test "$(git -C _deps/salts rev-parse HEAD)" = 98a175f8b6c4d88d30a4875294a1adaafa7e830e
+          test "$(git -C _deps/salts-core rev-parse HEAD)" = 287c30db125e1ada12d51bd17ba36cddd8302305
+          test "$(git -C _deps/salts rev-parse HEAD)" = f47751dc5698122f057b27088a40b43948a8da18
           echo "ORBIT_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           git log -1 --format='%H %s'
 
@@ -65,7 +65,7 @@ jobs:
           source_sha: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Select shared runner-native LLVM
-        uses: qigao/vcpkg-cache/.github/actions/setup-llvm-native@971d5d11325d01edef423e1d039afaec0409b2fe
+        uses: qigao/vcpkg-cache/.github/actions/setup-llvm-native@master
 
       - name: Build/install exact SaltsCore 0.1 native shared owners
         shell: bash
@@ -195,7 +195,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: qigao/salts-core
-          ref: cfc1ed0d24364689b10ef7a85cff28d8776eb7db
+          ref: 287c30db125e1ada12d51bd17ba36cddd8302305
           path: _deps/salts-core
           persist-credentials: false
 
@@ -203,7 +203,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: qigao/salts
-          ref: 98a175f8b6c4d88d30a4875294a1adaafa7e830e
+          ref: f47751dc5698122f057b27088a40b43948a8da18
           path: _deps/salts
           persist-credentials: false
 
@@ -212,8 +212,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
-          test "$(git -C _deps/salts-core rev-parse HEAD)" = cfc1ed0d24364689b10ef7a85cff28d8776eb7db
-          test "$(git -C _deps/salts rev-parse HEAD)" = 98a175f8b6c4d88d30a4875294a1adaafa7e830e
+          test "$(git -C _deps/salts-core rev-parse HEAD)" = 287c30db125e1ada12d51bd17ba36cddd8302305
+          test "$(git -C _deps/salts rev-parse HEAD)" = f47751dc5698122f057b27088a40b43948a8da18
 
       - name: Restore verified ccache tool and compiler outputs
         uses: qigao/stun/.github/actions/setup-ccache@4688683111b38dae5c2d814482b955dfc2e7d0a3
@@ -222,7 +222,7 @@ jobs:
           source_sha: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Select shared llvm-mingw UCRT
-        uses: qigao/vcpkg-cache/.github/actions/setup-llvm-mingw@971d5d11325d01edef423e1d039afaec0409b2fe
+        uses: qigao/vcpkg-cache/.github/actions/setup-llvm-mingw@master
         with:
           target: x64
           version: "20261020"
