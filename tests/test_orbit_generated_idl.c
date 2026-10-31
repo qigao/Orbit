@@ -24,6 +24,7 @@ extern int orbit_generated_cpp17_smoke(void);
 } while (0)
 
 extern int orbit_generated_multi_room_test(void);
+extern int orbit_generated_owned_room_test(void);
 
 /*
  * This source includes the REAL salts-idlc generated typed header. The
@@ -321,5 +322,6 @@ int main(void) {
     CHECK(orbit_generated_cpp17_smoke() == 0);
     test_generated_unary_dispatch();
     CHECK(orbit_generated_multi_room_test() == 0);
+    CHECK(orbit_generated_owned_room_test() == 0);
     return 0;
 }
