@@ -23,7 +23,7 @@ target_link_libraries(orbit_core
 
 # Build the optional ACE adapter ONLY when explicitly requested. This is
 # a feature selection, not a find/probe/fallback against another SDK epoch.
-# A standalone Orbit::Core build must not require Salts::ServiceHost.
+# A standalone Orbit::Core build must not require Salts::ACE.
 option(ORBIT_BUILD_ACE "Build canonical Salts ServiceHost scope adapter" OFF)
 if(ORBIT_BUILD_ACE)
   add_library(orbit_ace STATIC ace/src/scope.c)
@@ -33,7 +33,7 @@ if(ORBIT_BUILD_ACE)
   target_include_directories(orbit_ace PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ace/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-  target_link_libraries(orbit_ace PUBLIC Orbit::Core Salts::ServiceHost)
+  target_link_libraries(orbit_ace PUBLIC Orbit::Core Salts::ACE)
 endif()
 
 if(BUILD_TESTING)
