@@ -7,7 +7,7 @@ add_test(NAME orbit.core.native COMMAND orbit_core_native_test)
 add_executable(orbit_call_native_test test_orbit_call.c)
 target_compile_features(orbit_call_native_test PRIVATE c_std_11)
 target_link_libraries(orbit_call_native_test
-  PRIVATE Orbit::Core Salts::Platform)
+  PRIVATE Orbit::Core Salts::Platform Salts::CSTL)
 add_test(NAME orbit.core.call_native COMMAND orbit_call_native_test)
 
 # DSO acceptance has a single generated Context-v1 implementation; no
