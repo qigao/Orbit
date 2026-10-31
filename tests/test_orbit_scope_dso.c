@@ -10,6 +10,11 @@
 #include <cflow/scheduler.h>
 #include <cmeta/cmeta.h>
 
+#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
+#define DATABIND_NATIVE_ENABLE_ORBIT 1
+#include "game.service_native.h"
+#endif
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,6 +67,43 @@ static int actual_provider_value(orbit_ace_scope_guard *scope) {
     return orbit_dso_value_get(&value);
 }
 
+#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
+/*
+ * The SAME NativeSourceIR business symbols emitted for Game.Room are used
+ * here, but their instance receiver is the Salts Plugin Provider projection
+ * pinned by the original ServiceHost Scope. The actual getter executes
+ * inside the old DSO. There is no alternative Orbit handler ABI.
+ */
+typedef struct dso_room_receiver {
+    orbit_dso_value projected;
+    unsigned invocations;
+} dso_room_receiver;
+
+int databind_4_Game_4_Room_4_Ping(
+    void *receiver, const PingRequest *request, PingResponse *response) {
+    dso_room_receiver *room = (dso_room_receiver *)receiver;
+    int value;
+    if (!room || !request || !response) return 17;
+    value = orbit_dso_value_get(&room->projected);
+    if (value < 0) return 18;
+    ++room->invocations;
+    response->ack = request->seq + (uint64_t)value;
+    return 0;
+}
+
+int databind_4_Game_4_Room_4_Pong(
+    void *receiver, const PingRequest *request, PingResponse *response) {
+    dso_room_receiver *room = (dso_room_receiver *)receiver;
+    int value;
+    if (!room || !request || !response) return 19;
+    value = orbit_dso_value_get(&room->projected);
+    if (value < 0) return 20;
+    ++room->invocations;
+    response->ack = request->seq + (uint64_t)value + UINT64_C(100);
+    return 0;
+}
+#endif
+
 /*
  * Genuine DSO-owned provider -> post-commit CFlow Actor -> bounded Orbit
  * CallPort: no private loader/scheduler/callback queue. A generation N
@@ -75,8 +117,15 @@ typedef struct dso_actor {
     orbit_service_ref producer;
     orbit_call_port port;
     orbit_ace_scope_guard *scope;
-    cflow_machine_action_binding action;
+    cflow_machine_action_binding action[2];
     orbit_service_method method;
+#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
+    dso_room_receiver receiver;
+    databind_4_Game_4_Room__orbit_binding binding;
+    databind_4_Game_4_Room_4_Ping__orbit_context ping_context;
+    databind_4_Game_4_Room_4_Pong__orbit_context pong_context;
+    uint64_t first_result;
+#endif
     int state;
     unsigned observed;
     unsigned callbacks;
@@ -100,19 +149,31 @@ static bool dso_machine_action(
 static bool dso_actor_observe(
     void *user, const cmeta_type_desc *type, const void *value) {
     dso_actor *actor = (dso_actor *)user;
-    uint64_t token, request = 0u;
-    int provider;
+    uint64_t token;
     CHECK(actor != NULL && value != NULL);
     CHECK(cmeta_type_equal(type, &cmeta_type_uint64));
     token = *(const uint64_t *)value;
-    CHECK(orbit_call_u64_request(
-        &actor->port, token, UINT64_C(10), &request) == ORBIT_CALL_OK);
-    provider = actual_provider_value(actor->scope);
-    CHECK(provider == 37);
-    CHECK(orbit_call_u64_stage_reply(
-        &actor->port, token, UINT64_C(10), 0,
-        request + (uint64_t)provider) == ORBIT_CALL_OK);
-    CHECK(orbit_call_u64_observe(&actor->port, token) == ORBIT_CALL_OK);
+#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
+    /*
+     * Real generated, contextual post-commit dispatch calls the original
+     * native symbol with the scope-pinned DSO Provider receiver.
+     */
+    CHECK(databind_4_Game_4_Room__orbit_dispatch(
+        &actor->binding, token) == ORBIT_CALL_OK);
+#else
+    {
+        uint64_t request = 0u;
+        int provider;
+        CHECK(orbit_call_u64_request(
+            &actor->port, token, UINT64_C(10), &request) == ORBIT_CALL_OK);
+        provider = actual_provider_value(actor->scope);
+        CHECK(provider == 37);
+        CHECK(orbit_call_u64_stage_reply(
+            &actor->port, token, UINT64_C(10), 0,
+            request + (uint64_t)provider) == ORBIT_CALL_OK);
+        CHECK(orbit_call_u64_observe(&actor->port, token) == ORBIT_CALL_OK);
+    }
+#endif
     ++actor->observed;
     return true;
 }
@@ -131,6 +192,29 @@ static void dso_actor_on_done(void *user) {
         &actor->port, ORBIT_CALL_TERMINAL_STOPPED) == ORBIT_CALL_OK);
 }
 
+#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
+static void dso_generated_ping_done(
+    void *user, uint64_t token, orbit_call_terminal terminal,
+    int application_status, const PingResponse *response) {
+    dso_actor *actor = (dso_actor *)user;
+    CHECK(actor != NULL && token != 0u && response != NULL);
+    CHECK(terminal == ORBIT_CALL_TERMINAL_SUCCESS);
+    CHECK(application_status == 0);
+    actor->first_result = response->ack;
+    ++actor->callbacks;
+}
+
+static void dso_generated_pong_done(
+    void *user, uint64_t token, orbit_call_terminal terminal,
+    int application_status, const PingResponse *response) {
+    dso_actor *actor = (dso_actor *)user;
+    CHECK(actor != NULL && token != 0u && response != NULL);
+    CHECK(terminal == ORBIT_CALL_TERMINAL_SUCCESS);
+    CHECK(application_status == 0);
+    actor->last_result = response->ack;
+    ++actor->callbacks;
+}
+#else
 static void dso_actor_on_reply(void *user, uint64_t token,
                                orbit_call_terminal terminal,
                                int application_status, uint64_t value) {
@@ -141,58 +225,93 @@ static void dso_actor_on_reply(void *user, uint64_t token,
     ++actor->callbacks;
     actor->last_result = value;
 }
+#endif
 
 static void dso_actor_start(dso_actor *actor, orbit_ace_scope_guard *scope) {
     const cflow_machine_state states[] = {
         {1u, &cmeta_type_int, CFLOW_MACHINE_STATE_ACTIVE}
     };
-    const cflow_event_type events[] = {{100u, &cmeta_type_uint64}};
+    const cflow_event_type events[] = {
+        {100u, &cmeta_type_uint64}, {101u, &cmeta_type_uint64}
+    };
     const cflow_machine_action actions[] = {
         {300u, &cmeta_type_int, 100u, &cmeta_type_uint64,
+         &cmeta_type_int, CMETA_EFFECT_STATEFUL,
+         CMETA_PROP_DETERMINISTIC | CMETA_PROP_NO_ALIAS,
+         CFLOW_MACHINE_ACTION_VALUE, &cmeta_type_uint64, 0u},
+        {301u, &cmeta_type_int, 101u, &cmeta_type_uint64,
          &cmeta_type_int, CMETA_EFFECT_STATEFUL,
          CMETA_PROP_DETERMINISTIC | CMETA_PROP_NO_ALIAS,
          CFLOW_MACHINE_ACTION_VALUE, &cmeta_type_uint64, 0u}
     };
     const cflow_machine_transition transitions[] = {
-        {1u, 100u, 0u, 300u, 1u, 1u}
+        {1u, 100u, 0u, 300u, 1u, 1u},
+        {1u, 101u, 0u, 301u, 1u, 1u}
     };
+#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
+    const size_t event_count = 2u;
+#else
+    const size_t event_count = 1u;
+#endif
     const cflow_machine_definition definition = {
-        states, 1u, 1u, events, 1u, NULL, 0u,
-        actions, 1u, transitions, 1u
+        states, 1u, 1u, events, event_count, NULL, 0u,
+        actions, event_count, transitions, event_count
     };
     cflow_actor_config config = {0};
     orbit_service_config service_config;
+
     memset(actor, 0, sizeof(*actor));
     actor->scope = scope;
-    CHECK(cflow_machine_build(
-        &actor->machine, &definition) == CFLOW_MACHINE_OK);
+    CHECK(cflow_machine_build(&actor->machine, &definition) == CFLOW_MACHINE_OK);
     CHECK(cflow_executor_owner_init_with_capacity(
         &actor->executor, 64u, NULL, NULL));
     CHECK(cflow_scheduler_owner_bind(
         &actor->scheduler, &actor->executor, 32u));
-    actor->action = (cflow_machine_action_binding){
+    actor->action[0] = (cflow_machine_action_binding){
         300u, dso_machine_action, NULL
+    };
+    actor->action[1] = (cflow_machine_action_binding){
+        301u, dso_machine_action, NULL
     };
     config.machine = (cflow_machine_instance_config){
         &actor->machine, &actor->state, &cmeta_type_uint64,
-        NULL, 0u, &actor->action, 1u, 2u, &actor->executor
+        NULL, 0u, actor->action, event_count, 2u, &actor->executor
     };
     config.scheduler = &actor->scheduler;
     config.callbacks = (cflow_subscriber_callbacks){
         dso_actor_observe, dso_actor_on_error, dso_actor_on_done, actor
     };
+#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
+    /* Use exactly the one ServiceHost Scope acquired before Actor start. */
+    service_config = databind_4_Game_4_Room__orbit_service_config(&config);
+#else
     actor->method = (orbit_service_method){
         UINT64_C(10), 100u, &cmeta_type_uint64, ORBIT_METHOD_CALL_TOKEN
     };
-    service_config = (orbit_service_config){
-        &config, &actor->method, 1u
-    };
+    service_config = (orbit_service_config){&config, &actor->method, 1u};
+#endif
     CHECK(orbit_service_spawn(&actor->service, &service_config).status ==
           ORBIT_SERVICE_OK);
-    CHECK(orbit_call_port_init(
-        &actor->port, &actor->service, 2u) == ORBIT_CALL_OK);
+    CHECK(orbit_call_port_init(&actor->port, &actor->service, 2u) ==
+          ORBIT_CALL_OK);
     CHECK(orbit_service_ref_acquire(
         &actor->service, &actor->producer));
+
+#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
+    {
+        salts_configurator_service service;
+        orbit_dso_value view = orbit_dso_value_bind(NULL, NULL);
+        CHECK(orbit_ace_scope_guard_find_service(
+            scope, orbit_dso_value_interface(), &service) ==
+            SALTS_SERVICE_HOST_OK);
+        CHECK(orbit_dso_value_borrow_from_object(
+            service.object, service.interfaces, &view) == CMETA_OK);
+        actor->receiver.projected = view;
+        CHECK(databind_4_Game_4_Room__orbit_bind(
+            &actor->binding, &actor->port, &actor->receiver));
+        CHECK(actor->binding.receiver == &actor->receiver);
+    }
+#endif
     CHECK(orbit_ace_scope_guard_bind(
         scope, &actor->service, &actor->port) == ORBIT_ACE_SCOPE_OK);
 }
@@ -284,6 +403,32 @@ int main(void) {
     /* The OLD dynamically loaded Provider is invoked inside the Actor's
      * real post-commit CFlow Subscriber after N+1 has been published.
      */
+#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
+    {
+        PingRequest ping = {UINT64_C(5)};
+        PingRequest pong = {UINT64_C(7)};
+        uint64_t pong_token = 0u;
+        CHECK(databind_4_Game_4_Room_4_Ping__orbit_call_async(
+            &actor.port, &actor.producer, &ping, &actor.ping_context,
+            dso_generated_ping_done, &actor, &actor_token, &actor_send) ==
+            ORBIT_CALL_OK);
+        CHECK(actor_send == CFLOW_ACTOR_SEND_ACCEPTED);
+        CHECK(databind_4_Game_4_Room_4_Pong__orbit_call_async(
+            &actor.port, &actor.producer, &pong, &actor.pong_context,
+            dso_generated_pong_done, &actor, &pong_token, &actor_send) ==
+            ORBIT_CALL_OK);
+        CHECK(actor_send == CFLOW_ACTOR_SEND_ACCEPTED);
+        while (actor.callbacks < 2u && rounds++ < 2048u)
+            (void)cflow_executor_run_one(&actor.executor);
+        CHECK(actor.callbacks == 2u && actor.observed == 2u);
+        CHECK(actor.errors == 0u);
+        CHECK(actor.first_result == UINT64_C(42));
+        CHECK(actor.last_result == UINT64_C(144));
+        CHECK(actor.receiver.invocations == 2u);
+        CHECK(orbit_call_u64_observe(&actor.port, actor_token) ==
+              ORBIT_CALL_STALE);
+    }
+#else
     CHECK(orbit_call_u64_async(
         &actor.port, &actor.producer, UINT64_C(10), UINT64_C(5),
         dso_actor_on_reply, &actor, &actor_token, &actor_send) ==
@@ -293,6 +438,7 @@ int main(void) {
         (void)cflow_executor_run_one(&actor.executor);
     CHECK(actor.callbacks == 1u && actor.observed == 1u);
     CHECK(actor.errors == 0u && actor.last_result == UINT64_C(42));
+#endif
     CHECK(orbit_ace_scope_guard_generation_id(&old_scope) == UINT64_C(21));
 
     dso_actor_stop(&actor);
