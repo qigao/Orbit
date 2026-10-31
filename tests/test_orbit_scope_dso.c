@@ -624,7 +624,10 @@ int main(void) {
         /* The worker cannot cancel until the owner entered the business
          * symbol, so this is not the earlier pre-dispatch cancel case.
          */
-        (void)cflow_executor_run_one(&actor.executor);
+        rounds = 0u;
+        while (actor.observed < 4u && rounds++ < 2048u)
+            (void)cflow_executor_run_one(&actor.executor);
+        CHECK(actor.observed == 4u);
         CHECK(cmeta_thread_join(&business_thread) == 0);
         CHECK(atomic_load(&live_terminal_probe.proved_busy) == 2);
         atomic_store(&actor.receiver.hold_before_provider, false);
