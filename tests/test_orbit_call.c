@@ -1231,6 +1231,19 @@ static void test_owned_value_deepcopy_and_capacity(void) {
         &f.calls, &f.ref, 10u, &source,
         call_owned_terminal, &f.probe, &token, &send) == ORBIT_CALL_OK);
     CHECK(token != 0u && send == CFLOW_ACTOR_SEND_ACCEPTED);
+    {
+        orbit_method_id method = 0u;
+        uint64_t rejected_scalar_view = 0u;
+        /* Generated post-commit routing can inspect a method ID for either
+         * slot kind, without acquiring a borrowed managed request view.
+         */
+        CHECK(orbit_call_u64_method(&f.calls, token, &method) == ORBIT_CALL_OK);
+        CHECK(method == UINT64_C(10));
+        CHECK(orbit_call_u64_request(
+            &f.calls, token, method, &rejected_scalar_view) ==
+            ORBIT_CALL_TYPE_MISMATCH);
+        CHECK(rejected_scalar_view == 0u);
+    }
     CHECK(orbit_call_u64_async(
         &f.calls, &f.ref, 10u, 1u, call_terminal, &f.probe,
         &rejected, &send) == ORBIT_CALL_TYPE_MISMATCH);
@@ -1252,6 +1265,12 @@ static void test_owned_value_deepcopy_and_capacity(void) {
     CHECK(stats.occupied == 0u && stats.executing == 0u);
     CHECK(stats.completed_success == 1u && stats.rejected_full == 1u);
     CHECK(stats.rejected >= 1u); /* forced CMeta copy fault */
+    {
+        orbit_method_id stale_method = UINT64_C(777);
+        CHECK(orbit_call_u64_method(&f.calls, token, &stale_method) ==
+              ORBIT_CALL_STALE);
+        CHECK(stale_method == UINT64_C(777));
+    }
     {
         const void *expired_request = NULL;
         CHECK(orbit_call_value_begin(&f.calls, token, 10u,

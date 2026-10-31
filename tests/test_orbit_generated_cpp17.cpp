@@ -1,9 +1,19 @@
 #define DATABIND_NATIVE_ENABLE_ORBIT 1
 #include "game.service_native.h"
+#include "owned_room.service_native.h"
 #include "idl/room_state.h"
 
 #include <cstdint>
 #include <type_traits>
+
+static_assert(std::is_standard_layout<OwnedPacket>::value,
+              "Managed NativeSourceIR request must have one public C++17 layout");
+static_assert(std::is_standard_layout<
+                  databind_9_OwnedGame_4_Room_4_Echo__orbit_context>::value,
+              "Managed generated Client context must retain the C++17 C ABI");
+static_assert(std::is_standard_layout<
+                  databind_9_OwnedGame_4_Room_4_Echo__orbit_value_owner>::value,
+              "Managed CMeta binding owner must have one stable C++17 layout");
 
 static_assert(std::is_standard_layout<PingRequest>::value,
               "Canonical generated request must retain C layout");

@@ -1,0 +1,11 @@
+schema OwnedGame [version(1)];
+
+message OwnedPacket {
+    string label;
+    bytes payload;
+}
+
+service Room {
+    [orbit(10,100),native_context(1),orbit_value(64,64)]
+    Echo: OwnedPacket -> OwnedPacket;
+}
