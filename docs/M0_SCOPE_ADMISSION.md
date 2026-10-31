@@ -24,16 +24,16 @@ resizable vector, moved after acquisition, or copied into a call slot.
     native CFlow Actor                   canonical Scope guard
     bounded Call Port                         |
     no ServiceHost link                       v
-                               Salts::ServiceHost / Salts::Configurator
+                               CMeta::ACE (Configurator / ServiceHost)
                                      Plugin Registry / generations
 ```
 
 `Orbit::Core` remains a standalone static library linked against
-`Salts::CFlow` and `Salts::Platform`. The separate `Orbit::ACE`
+`CMeta::CFlow` and `Salts::Platform`. The separate `Orbit::ACE`
 static target is built only with the explicit `-DORBIT_BUILD_ACE=ON`
-selection and links `Orbit::Core` and `Salts::ServiceHost`. With the
+selection and links `Orbit::Core` and `CMeta::ACE`. With the
 default `OFF` only `Orbit::Core` is built, without requiring a
-ServiceHost target. An explicitly selected missing `Salts::ServiceHost`
+ACE target. An explicitly selected missing `CMeta::ACE`
 is a hard CMake error, not a probe or fallback.
 
 The real Salts 3.0 CMake package remains the one ABI authority. No dynamic

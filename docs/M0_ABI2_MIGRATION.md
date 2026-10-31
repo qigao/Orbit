@@ -1,3 +1,24 @@
+## CMeta package identity follow-up
+
+This branch builds the exact CMeta source `d6522e311057977221944dd316e6332612c6c6d6` from
+[Salts #1337](https://github.com/qigao/salts/pull/1337), stacked on #1336.
+The GitHub repository remains qigao/salts until its separate manual rename.
+Consumers require `find_package(CMeta 4.0 CONFIG REQUIRED)` and link CMeta::
+targets, with no former Salts package aliases. Core-owned Salts:: targets and
+native/Provider/binding ABI contracts remain unchanged.
+
+Both existing native jobs select the same compiler for installed Core, CMeta
+and Orbit: runner-native Clang on Linux, llvm-mingw/UCRT 20261020 on Windows.
+The shared compiler actions use vcpkg-cache@master after #244 merged.
+Core source is pinned to `287c30db125e1ada12d51bd17ba36cddd8302305` from Core #135,
+which qualifies explicit Platform DLL exports, real scheduler TLS and
+llvm-mingw TinyTest initialization in the existing native graph.
+No SDK publication or compiler/CRT cache relabeling is authorized by these
+source tests. The separate old salts-idlc executable remains a host process.
+
+Previous tables and CI evidence below describe earlier source revisions;
+they do not qualify this package/toolchain change.
+
 # M0 — ACE / Provider targets and native ABI 2
 
 This stacked Draft continues Orbit #19 and consumes the breaking native API in
@@ -11,8 +32,8 @@ Both the Orbit build and its installed package require `Salts 4.0`. Static
 Provider construction uses `salts_configurator_provider_binding`,
 `salts_configurator_dependency` and binding ABI version 2. Dynamic Providers
 include `<salts/service_host_provider_abi.h>` and link only
-`Salts::Provider`, which carries the CMeta/Plugin contracts without linking
-the ACE runtime. Orbit::ACE links `Salts::ACE`. The reflected
+`CMeta::Provider`, which carries the CMeta/Plugin contracts without linking
+the ACE runtime. Orbit::ACE links `CMeta::ACE`. The reflected
 `salts_service_host_provider` Interface publishes the current version-2
 contract and borrowed binding. No compatibility type, old header or fallback
 contract is supplied by Orbit.
@@ -30,6 +51,12 @@ separate generation/Scope lifetime. Publication validates the exclusively owned
 BUILT candidate outside runtime admission locking, then rechecks state/epoch
 before attachment. Drain reserves one STOPPING bundle before validation and
 teardown. These fixes retain native ABI 2.0 and the existing typed C functions.
+
+Construction failure phase, component/dependency indices and Provider status
+also survive complete generation cleanup and explicit recovery as scalar
+Configurator diagnostics. Storage and Plugin leases still settle normally;
+these error values do not retain a Provider image and reset on an admitted
+new build. No native ABI/layout or caller lifecycle API changes are required.
 
 ## Existing executable path
 
@@ -52,7 +79,7 @@ discarded hand-written DSO adapter remains absent.
 
 | Input | Identity |
 | --- | --- |
-| Salts runtime | `408c07803c84687653a7e2d1625c79a69d535f87` — Salts 4.0 / ABI 2.0, ACE / Provider targets |
+| Salts runtime | `7d57b78ba8dffacd935f87d926b97a6eb8627377` — Salts 4.0 / ABI 2.0, ACE / Provider targets |
 | Core runtime | `cfc1ed0d24364689b10ef7a85cff28d8776eb7db` — Core 0.1 |
 | Canonical host compiler | SaltsUtils `852b5cc741ef0debb1735b03e129bb30a136f038` |
 | Host artifact run | `41168655686`, Linux/Windows native SDKs |
