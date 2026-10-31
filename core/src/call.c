@@ -416,7 +416,12 @@ orbit_call_status orbit_call_u64_method(
         return ORBIT_CALL_INVALID_ARGUMENT;
     cmeta_mutex_lock(&impl->mutex);
     slot = orbit_call_lookup_locked(impl, token);
-    if (slot == NULL || slot->managed || impl->closed ||
+    /* The method-id lookup has no borrowed VALUE pointer or reply state.
+     * One canonical generated dispatcher routes both u64 and managed Calls.
+     * Only the separate scalar request/stage_reply APIs reject managed
+     * storage; cancellation and generation invalidation still return STALE.
+     */
+    if (slot == NULL || impl->closed ||
         slot->cancel_requested || slot->observed) {
         cmeta_mutex_unlock(&impl->mutex);
         return ORBIT_CALL_STALE;
