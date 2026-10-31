@@ -1006,7 +1006,7 @@ orbit_call_status orbit_call_value_stage_reply(
     orbit_call_impl *impl = orbit_call_live(port);
     orbit_call_slot *slot;
     orbit_call_status bounded = ORBIT_CALL_OK;
-    cmeta_status copy_status = CMETA_OK;
+    const uint32_t generation = (uint32_t)(token >> 32);
     if (impl == NULL || !impl->value_enabled ||
         token == 0u || expected_method == 0u)
         return ORBIT_CALL_INVALID_ARGUMENT;
@@ -1021,29 +1021,52 @@ orbit_call_status orbit_call_value_stage_reply(
         cmeta_mutex_unlock(&impl->mutex);
         return ORBIT_CALL_TYPE_MISMATCH;
     }
-    if (slot->staged || slot->observed || slot->executing != 1u) {
+    if (slot->staged || slot->staging || slot->observed ||
+        slot->executing != 1u) {
         cmeta_mutex_unlock(&impl->mutex);
         return ORBIT_CALL_DUPLICATE;
     }
-    if (application_status == 0) {
-        if (response == NULL) {
-            cmeta_mutex_unlock(&impl->mutex);
-            return ORBIT_CALL_INVALID_ARGUMENT;
-        }
-        bounded = orbit_value_check_size(
-            impl->value_contract.response, response,
-            impl->value_contract.max_response_bytes);
-        if (bounded == ORBIT_CALL_OK) {
-            copy_status = cmeta_data_value_copy(
-                impl->value_contract.response,
-                slot->owned_response.storage, response);
-            if (copy_status != CMETA_OK)
-                bounded = ORBIT_CALL_VALUE_COPY_FAILED;
-        }
-        if (bounded != ORBIT_CALL_OK) {
-            cmeta_mutex_unlock(&impl->mutex);
-            return bounded;
-        }
+    if (application_status != 0) {
+        /* No CMeta provider is called for an application-error terminal. */
+        slot->staged = true;
+        slot->application_status = application_status;
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_OK;
+    }
+    if (response == NULL) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_INVALID_ARGUMENT;
+    }
+    /* The original post-commit borrow pins both Port storage objects.
+     * Reserve STAGING before invoking any provider outside the Port mutex.
+     * A reentrant cancel/close may settle the local terminal, but it cannot
+     * recycle this slot while the original business borrow still executes.
+     */
+    slot->staging = true;
+    cmeta_mutex_unlock(&impl->mutex);
+
+    bounded = orbit_value_check_size(
+        impl->value_contract.response, response,
+        impl->value_contract.max_response_bytes);
+    if (bounded == ORBIT_CALL_OK &&
+        cmeta_data_value_copy(
+            impl->value_contract.response,
+            slot->owned_response.storage, response) != CMETA_OK)
+        bounded = ORBIT_CALL_VALUE_COPY_FAILED;
+
+    cmeta_mutex_lock(&impl->mutex);
+    if (slot->generation != generation || !slot->managed ||
+        !slot->staging || slot->executing != 1u)
+        abort(); /* only the original post-commit execution owner can end */
+    slot->staging = false;
+    if (impl->closed || slot->state != ORBIT_SLOT_ACTIVE ||
+        slot->cancel_requested) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_STALE;
+    }
+    if (bounded != ORBIT_CALL_OK) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return bounded; /* the generated owner emits NO_REPLY on observe */
     }
     slot->staged = true;
     slot->application_status = application_status;
@@ -1073,11 +1096,19 @@ orbit_call_status orbit_call_value_end(
         cmeta_mutex_unlock(&impl->mutex);
         return ORBIT_CALL_TYPE_MISMATCH;
     }
+    if (slot->staging) {
+        /* A reentrant Provider cannot drop the lifetime pin while its
+         * response is still being deep-copied into Port-owned storage.
+         */
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_BUSY;
+    }
     --impl->executing;
     slot->executing = 0u;
-    if (slot->state == ORBIT_SLOT_RETAINED)
-        orbit_call_release_slot_locked(slot);
+    const bool reclaim = slot->state == ORBIT_SLOT_RETAINED;
+    if (reclaim) slot->state = ORBIT_SLOT_RECLAIMING;
     cmeta_mutex_unlock(&impl->mutex);
+    if (reclaim) orbit_call_reclaim_slot(impl, slot);
     return ORBIT_CALL_OK;
 }
 
