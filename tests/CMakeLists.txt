@@ -10,6 +10,10 @@ target_link_libraries(orbit_call_native_test
   PRIVATE Orbit::Core Salts::Platform)
 add_test(NAME orbit.core.call_native COMMAND orbit_call_native_test)
 
+# DSO acceptance has a single generated Context-v1 implementation; no
+# hand-written non-IDL Provider adapter is compiled as an alternative.
+option(ORBIT_IDL_CONFORMANCE "Compile and run genuine generated unary Service" OFF)
+
 if(ORBIT_BUILD_ACE)
   add_executable(orbit_scope_native_test test_orbit_scope.c)
   target_compile_features(orbit_scope_native_test PRIVATE c_std_11)
@@ -22,29 +26,31 @@ if(ORBIT_BUILD_ACE)
   target_link_libraries(orbit_scope_provider_native_test PRIVATE Orbit::ACE)
   add_test(NAME orbit.ace.provider_native COMMAND orbit_scope_provider_native_test)
 
-  # Two real strict-FR0 Provider DSOs in the normal native graph, linked to
-  # the canonical Salts Plugin/ComponentProvider ABI (no loader reimplementation).
-  add_library(orbit_dso_provider_n SHARED fixtures/orbit_dso_provider.c)
-  add_library(orbit_dso_provider_next SHARED fixtures/orbit_dso_provider.c)
-  foreach(provider IN ITEMS orbit_dso_provider_n orbit_dso_provider_next)
-    target_compile_features(${provider} PRIVATE c_std_11)
-    target_link_libraries(${provider}
-      PRIVATE Salts::ComponentProviderABI Salts::PluginABI)
-  endforeach()
-  target_compile_definitions(orbit_dso_provider_n
-    PRIVATE ORBIT_DSO_PROVIDER_INDEX=1)
-  target_compile_definitions(orbit_dso_provider_next
-    PRIVATE ORBIT_DSO_PROVIDER_INDEX=2)
-
-  add_executable(orbit_scope_dso_native_test test_orbit_scope_dso.c)
-  target_compile_features(orbit_scope_dso_native_test PRIVATE c_std_11)
-  target_link_libraries(orbit_scope_dso_native_test PRIVATE Orbit::ACE)
-  target_compile_definitions(orbit_scope_dso_native_test PRIVATE
-    "ORBIT_DSO_PROVIDER_N_PATH=\"$<TARGET_FILE:orbit_dso_provider_n>\""
-    "ORBIT_DSO_PROVIDER_NEXT_PATH=\"$<TARGET_FILE:orbit_dso_provider_next>\"")
-  add_dependencies(orbit_scope_dso_native_test
-    orbit_dso_provider_n orbit_dso_provider_next)
-  add_test(NAME orbit.ace.dso_native COMMAND orbit_scope_dso_native_test)
+  if(ORBIT_IDL_CONFORMANCE)
+    # Two real strict-FR0 Provider DSOs in the normal native graph, linked to
+    # the canonical Salts Plugin/ComponentProvider ABI (no loader reimplementation).
+    add_library(orbit_dso_provider_n SHARED fixtures/orbit_dso_provider.c)
+    add_library(orbit_dso_provider_next SHARED fixtures/orbit_dso_provider.c)
+    foreach(provider IN ITEMS orbit_dso_provider_n orbit_dso_provider_next)
+      target_compile_features(${provider} PRIVATE c_std_11)
+      target_link_libraries(${provider}
+        PRIVATE Salts::ComponentProviderABI Salts::PluginABI)
+    endforeach()
+    target_compile_definitions(orbit_dso_provider_n
+      PRIVATE ORBIT_DSO_PROVIDER_INDEX=1)
+    target_compile_definitions(orbit_dso_provider_next
+      PRIVATE ORBIT_DSO_PROVIDER_INDEX=2)
+  
+    add_executable(orbit_scope_dso_native_test test_orbit_scope_dso.c)
+    target_compile_features(orbit_scope_dso_native_test PRIVATE c_std_11)
+    target_link_libraries(orbit_scope_dso_native_test PRIVATE Orbit::ACE)
+    target_compile_definitions(orbit_scope_dso_native_test PRIVATE
+      "ORBIT_DSO_PROVIDER_N_PATH=\"$<TARGET_FILE:orbit_dso_provider_n>\""
+      "ORBIT_DSO_PROVIDER_NEXT_PATH=\"$<TARGET_FILE:orbit_dso_provider_next>\"")
+    add_dependencies(orbit_scope_dso_native_test
+      orbit_dso_provider_n orbit_dso_provider_next)
+    add_test(NAME orbit.ace.dso_native COMMAND orbit_scope_dso_native_test)
+  endif()
 endif()
 
 # The normal native test graph owns public C++17 C ABI admission. This is
@@ -62,7 +68,6 @@ add_test(NAME orbit.public.cpp17 COMMAND orbit_public_cpp_test)
 # graph against the actual Salts 3 / Orbit Core SDK. This is opt-in until
 # both upstream canonical SDK epochs can be admitted; no probe/consumer
 # project or copied/handwritten generated output is allowed.
-option(ORBIT_IDL_CONFORMANCE "Compile and run genuine generated unary Service" OFF)
 if(ORBIT_IDL_CONFORMANCE)
   # Only an immutable host CLI is used. A separate Windows tool executable
   # has the same canonical generator semantics and must not be linked to
@@ -113,16 +118,13 @@ if(ORBIT_IDL_CONFORMANCE)
   add_test(NAME orbit.idl.generated_unary
     COMMAND orbit_generated_idl_native_test)
 
-  # The existing DSO/ACE native test consumes the SAME generated Native
-  # Contract as the local Room test. It invokes the old Plugin Provider
-  # after N+1 through the canonical receiver-bound Dispatcher, with no
-  # second generator command, test target or DSO loader.
+  # The canonical DSO/ACE native test reuses the ONE generated Contract.
+  # With IDL conformance OFF, this test target is not created; there is
+  # no stale hand-written Provider dispatch fallback.
   if(ORBIT_BUILD_ACE)
     target_sources(orbit_scope_dso_native_test PRIVATE
       "${_orbit_idl_header}" "${_orbit_idl_records}")
     target_include_directories(orbit_scope_dso_native_test PRIVATE
       "${_orbit_idl_dir}")
-    target_compile_definitions(orbit_scope_dso_native_test PRIVATE
-      ORBIT_TEST_IDL_CONTEXT_DSO=1)
   endif()
 endif()
