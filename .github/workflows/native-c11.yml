@@ -119,6 +119,10 @@ jobs:
           assert obj['run_id'] == '41154348357', obj
           assert obj['rid'] == 'linux-x64', obj
           PY
+          # download-artifact does not preserve executable mode bits.
+          # Restore execute permission ONLY on the exact provenance-pinned CLI.
+          test -f _deps/saltsutils-idl-host/utils/bin/salts-idlc
+          chmod 755 _deps/saltsutils-idl-host/utils/bin/salts-idlc
           test -x _deps/saltsutils-idl-host/utils/bin/salts-idlc
           test -f _deps/saltsutils-idl-host/utils/include/data_bind_binding_plan.h
           test -f _deps/saltsutils-idl-host/salts/lib/libsalts.so.2.3
