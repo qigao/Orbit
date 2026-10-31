@@ -35,6 +35,31 @@ typedef struct test_owned_bytes {
 
 static atomic_bool test_owned_fail_copy;
 
+/* A test-only owning BufferOps provider can reenter the ORIGINAL CallPort
+ * from its copy and restore hooks. Hooks are enabled only after the
+ * application constructs its local input/reply (no accidental recursion).
+ */
+typedef struct test_owned_reentry_context {
+    orbit_call_port *port;
+    orbit_service_ref *producer;
+    uint64_t token;
+    atomic_bool hook_copy;
+    atomic_bool hook_restore;
+    atomic_int copy_hits;
+    atomic_int restore_hits;
+} test_owned_reentry_context;
+
+static _Atomic(test_owned_reentry_context *) test_owned_reentry_active;
+
+static void test_owned_reentry_unexpected_callback(
+    void *user, uint64_t token, orbit_call_terminal terminal,
+    int status, const void *response) {
+    (void)user; (void)token; (void)terminal;
+    (void)status; (void)response;
+    CHECK(0 && "rejected reentrant submission must have no callback");
+}
+
+
 static bool test_owned_is_zero(const void *object) {
     const test_owned_bytes *v = (const test_owned_bytes *)object;
     return v && v->data == NULL && v->size == 0u;
@@ -46,7 +71,30 @@ static cmeta_status test_owned_init_zero(void *object) {
 }
 static void test_owned_restore_zero(void *object) {
     test_owned_bytes *v = (test_owned_bytes *)object;
+    test_owned_reentry_context *ctx = atomic_load(&test_owned_reentry_active);
     if (!v) return;
+    if (ctx != NULL && atomic_exchange(&ctx->hook_restore, false)) {
+        orbit_call_port_stats stats = {0};
+        cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+        uint64_t rejected = UINT64_MAX;
+        static const unsigned char input[] = {0u, 0xffu, 0x42u, 0x80u};
+        const test_owned_bytes borrowed = {
+            (unsigned char *)input, sizeof(input)
+        };
+        CHECK(orbit_call_port_get_stats(ctx->port, &stats));
+        CHECK(stats.capacity == 1u && stats.occupied == 1u);
+        CHECK(stats.executing == 0u && stats.callbacks_inflight == 0u);
+        /* RECLAIMING must remain occupied; request storage may not be
+         * reused until every original CMeta provider restore finishes.
+         */
+        CHECK(orbit_call_value_async(
+            ctx->port, ctx->producer, 10u, &borrowed,
+            test_owned_reentry_unexpected_callback, NULL,
+            &rejected, &send) == ORBIT_CALL_FULL);
+        CHECK(rejected == 0u);
+        CHECK(orbit_call_port_try_destroy(ctx->port) == ORBIT_CALL_BUSY);
+        atomic_fetch_add(&ctx->restore_hits, 1);
+    }
     free(v->data);
     *v = (test_owned_bytes){0};
 }
@@ -58,6 +106,26 @@ static cmeta_status test_owned_assign(
         return CMETA_INVALID_ARGUMENT;
     if (size > max_bytes) return CMETA_CAPACITY_EXCEEDED;
     if (atomic_load(&test_owned_fail_copy)) return CMETA_OUT_OF_MEMORY;
+    {
+        test_owned_reentry_context *ctx =
+            atomic_load(&test_owned_reentry_active);
+        if (ctx != NULL && atomic_exchange(&ctx->hook_copy, false)) {
+            orbit_call_port_stats stats = {0};
+            CHECK(orbit_call_port_get_stats(ctx->port, &stats));
+            CHECK(stats.executing == 1u && stats.occupied == 1u);
+            CHECK(stats.callbacks_inflight == 0u);
+            /* Only the CFlow business owner may release the request pin.
+             * Reentry from within stage_reply must get BUSY, not unpin it.
+             */
+            CHECK(orbit_call_value_end(
+                ctx->port, ctx->token, 10u) == ORBIT_CALL_BUSY);
+            CHECK(orbit_call_u64_observe(
+                ctx->port, ctx->token) == ORBIT_CALL_BUSY);
+            CHECK(orbit_call_u64_cancel(
+                ctx->port, ctx->token) == ORBIT_CALL_OK);
+            atomic_fetch_add(&ctx->copy_hits, 1);
+        }
+    }
     if (size == 0u) return CMETA_OK;
     copy = (unsigned char *)malloc(size);
     if (!copy) return CMETA_OUT_OF_MEMORY;
@@ -149,6 +217,8 @@ typedef struct call_probe {
     atomic_bool owned_business_entered;
     atomic_bool release_owned_business;
     atomic_bool fail_owned_reply_copy;
+    atomic_bool reenter_owned_stage_copy;
+    atomic_bool reenter_owned_restore;
 } call_probe;
 
 typedef struct call_fixture {
@@ -357,6 +427,12 @@ static bool call_owned_observe(void *user, const cmeta_type_desc *type,
         const bool fail = atomic_load(&f->probe.fail_owned_reply_copy);
         /* Fail the canonical Port's deep-copy, not business construction. */
         if (fail) atomic_store(&test_owned_fail_copy, true);
+        if (atomic_load(&f->probe.reenter_owned_stage_copy)) {
+            test_owned_reentry_context *ctx =
+                atomic_load(&test_owned_reentry_active);
+            CHECK(ctx != NULL);
+            atomic_store(&ctx->hook_copy, true);
+        }
         status = orbit_call_value_stage_reply(
             &f->calls, token, 10u, 0, &reply);
         if (fail) atomic_store(&test_owned_fail_copy, false);
@@ -388,6 +464,15 @@ static void call_owned_terminal(
         CHECK(memcmp(((const test_owned_bytes *)bytes)->data,
                      expected, sizeof(expected)) == 0);
         atomic_fetch_add(&p->successes, 1);
+        if (atomic_load(&p->reenter_owned_restore)) {
+            test_owned_reentry_context *ctx =
+                atomic_load(&test_owned_reentry_active);
+            CHECK(ctx != NULL);
+            /* Turn on the hook AFTER the business-side owned reply has
+             * been cleared, just before Port-owned cleanup begins.
+             */
+            atomic_store(&ctx->hook_restore, true);
+        }
         if (atomic_load(&p->block_terminal)) {
             size_t spins = 0u;
             /* The borrowed owning response and the one Port credit MUST
@@ -470,6 +555,8 @@ static void fixture_prepare_ex(call_fixture *fixture, size_t mailbox_capacity,
     atomic_init(&fixture->probe.owned_business_entered, false);
     atomic_init(&fixture->probe.release_owned_business, false);
     atomic_init(&fixture->probe.fail_owned_reply_copy, false);
+    atomic_init(&fixture->probe.reenter_owned_stage_copy, false);
+    atomic_init(&fixture->probe.reenter_owned_restore, false);
     CHECK(cflow_machine_build(&fixture->machine, &definition) == CFLOW_MACHINE_OK);
     CHECK(cflow_executor_owner_init_with_capacity(
         &fixture->executor, 64u, NULL, NULL));
