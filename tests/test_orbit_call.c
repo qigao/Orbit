@@ -5,6 +5,8 @@
 #include <cflow/machine.h>
 #include <cflow/scheduler.h>
 #include <cmeta/cmeta.h>
+#include <cmeta_cmeta_data.h>
+#include <cstl/byte_buffer.h>
 #include <salts/thread.h>
 
 #include <stdatomic.h>
@@ -42,6 +44,9 @@ typedef struct call_probe {
     atomic_bool block_terminal;
     atomic_bool terminal_entered;
     atomic_bool release_terminal;
+    atomic_bool hold_owned_business;
+    atomic_bool owned_business_entered;
+    atomic_bool release_owned_business;
 } call_probe;
 
 typedef struct call_fixture {
@@ -56,6 +61,7 @@ typedef struct call_fixture {
     orbit_service_method methods[2];
     orbit_service_config service_config;
     int state;
+    bool has_owned_value;
     call_probe probe;
 } call_fixture;
 
@@ -205,8 +211,85 @@ static void call_terminal(void *user, uint64_t token,
     }
 }
 
-static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
-                            size_t call_capacity) {
+
+/* Same existing CFlow post-commit callback; a managed record is borrowed
+ * through a generation-checked execution pin rather than read from a second
+ * queue, global current-room or direct Actor Event pointer.
+ */
+static bool call_owned_observe(void *user, const cmeta_type_desc *type,
+                               const void *value) {
+    call_fixture *f = (call_fixture *)user;
+    const void *borrowed = NULL;
+    uint64_t token;
+    orbit_call_status status;
+    stl_byte_buffer reply = {0};
+    const unsigned char expected[] = {0u, 0xFFu, 0x42u, 0x80u};
+    size_t checks = 0u;
+    CHECK(f != NULL && value != NULL);
+    CHECK(cmeta_type_equal(type, &cmeta_type_uint64));
+    token = *(const uint64_t *)value;
+    status = orbit_call_value_begin(&f->calls, token, 10u, &borrowed);
+    if (status == ORBIT_CALL_STALE) {
+        atomic_fetch_add(&f->probe.skipped_cancelled, 1);
+        atomic_fetch_add(&f->probe.observed, 1);
+        return true;
+    }
+    CHECK(status == ORBIT_CALL_OK && borrowed != NULL);
+    atomic_fetch_add(&f->probe.business_executions, 1);
+    if (atomic_load(&f->probe.hold_owned_business)) {
+        atomic_store(&f->probe.owned_business_entered, true);
+        while (!atomic_load(&f->probe.release_owned_business) &&
+               checks++ < 10000u)
+            cmeta_sleep_ms(1u);
+        CHECK(atomic_load(&f->probe.release_owned_business));
+    }
+    {
+        const stl_byte_buffer *request = (const stl_byte_buffer *)borrowed;
+        CHECK(stl_byte_buffer_size(request) == sizeof(expected));
+        CHECK(memcmp(stl_byte_buffer_data((stl_byte_buffer *)request),
+                     expected, sizeof(expected)) == 0);
+    }
+    CHECK(stl_byte_buffer_from(
+        &reply, expected, sizeof(expected), 32u) == STL_OK);
+    status = orbit_call_value_stage_reply(
+        &f->calls, token, 10u, 0, &reply);
+    CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
+    stl_byte_buffer_destroy(&reply); /* application still owns the reply */
+    CHECK(orbit_call_value_end(&f->calls, token, 10u) == ORBIT_CALL_OK);
+    status = orbit_call_value_observe(&f->calls, token);
+    CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
+    atomic_fetch_add(&f->probe.observed, 1);
+    return true;
+}
+
+static void call_owned_terminal(
+    void *user, uint64_t token, orbit_call_terminal outcome,
+    int application_status, const void *response) {
+    call_probe *p = (call_probe *)user;
+    orbit_call_port_stats stats = {0};
+    const unsigned char expected[] = {0u, 0xFFu, 0x42u, 0x80u};
+    CHECK(p && token != 0u && application_status == 0);
+    CHECK(orbit_call_u64_cancel(p->port, token) == ORBIT_CALL_STALE);
+    CHECK(orbit_call_port_get_stats(p->port, &stats));
+    CHECK(stats.callbacks_inflight >= 1u);
+    atomic_fetch_add(&p->callback_count, 1);
+    if (outcome == ORBIT_CALL_TERMINAL_SUCCESS) {
+        const stl_byte_buffer *bytes = (const stl_byte_buffer *)response;
+        CHECK(bytes != NULL && stl_byte_buffer_size(bytes) == sizeof(expected));
+        CHECK(memcmp(stl_byte_buffer_data((stl_byte_buffer *)bytes),
+                     expected, sizeof(expected)) == 0);
+        atomic_fetch_add(&p->successes, 1);
+    } else if (outcome == ORBIT_CALL_TERMINAL_CANCELLED) {
+        CHECK(response == NULL);
+        CHECK(stats.executing == 1u); /* request still borrowed! */
+        atomic_fetch_add(&p->cancelled, 1);
+    } else {
+        CHECK(0 && "unexpected native VALUE terminal");
+    }
+}
+
+static void fixture_prepare_ex(call_fixture *fixture, size_t mailbox_capacity,
+                               size_t call_capacity, bool managed) {
     const cflow_machine_state states[] = {
         {10u, &cmeta_type_int, CFLOW_MACHINE_STATE_ACTIVE}
     };
@@ -233,6 +316,7 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
         actions, 2u, transitions, 2u
     };
     memset(fixture, 0, sizeof(*fixture));
+    fixture->has_owned_value = managed;
     fixture->probe.port = &fixture->calls;
     /* An all-zero byte image is not a substitute for C11 atomic_init. */
     atomic_init(&fixture->probe.calls, 0);
@@ -256,6 +340,9 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
     atomic_init(&fixture->probe.block_terminal, false);
     atomic_init(&fixture->probe.terminal_entered, false);
     atomic_init(&fixture->probe.release_terminal, false);
+    atomic_init(&fixture->probe.hold_owned_business, false);
+    atomic_init(&fixture->probe.owned_business_entered, false);
+    atomic_init(&fixture->probe.release_owned_business, false);
     CHECK(cflow_machine_build(&fixture->machine, &definition) == CFLOW_MACHINE_OK);
     CHECK(cflow_executor_owner_init_with_capacity(
         &fixture->executor, 64u, NULL, NULL));
@@ -275,7 +362,8 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
     };
     fixture->actor_config.scheduler = &fixture->scheduler;
     fixture->actor_config.callbacks = (cflow_subscriber_callbacks){
-        call_observe, call_on_error, call_on_done, fixture
+        managed ? call_owned_observe : call_observe,
+        call_on_error, call_on_done, fixture
     };
     fixture->methods[0] = (orbit_service_method){
         10u, 100u, &cmeta_type_uint64, ORBIT_METHOD_CALL_TOKEN
@@ -288,14 +376,30 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
     };
     CHECK(orbit_service_spawn(&fixture->service, &fixture->service_config)
           .status == ORBIT_SERVICE_OK);
-    CHECK(orbit_call_port_init(
-        &fixture->calls, &fixture->service, call_capacity) == ORBIT_CALL_OK);
+    if (managed) {
+        const orbit_call_value_contract contract = {
+            10u, &stl_byte_buffer_cmeta_data,
+            &stl_byte_buffer_cmeta_data, 32u, 32u
+        };
+        CHECK(orbit_call_port_init_value(
+            &fixture->calls, &fixture->service,
+            call_capacity, &contract) == ORBIT_CALL_OK);
+    } else {
+        CHECK(orbit_call_port_init(
+            &fixture->calls, &fixture->service,
+            call_capacity) == ORBIT_CALL_OK);
+    }
     CHECK(orbit_service_ref_acquire(&fixture->service, &fixture->ref));
     {
         const uint64_t forged_token = UINT64_C(1) << 32 | UINT64_C(1);
         CHECK(orbit_service_ref_try_send(&fixture->ref, 10u, &forged_token)
               == CFLOW_ACTOR_SEND_INVALID_ARGUMENT);
     }
+}
+
+static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
+                            size_t call_capacity) {
+    fixture_prepare_ex(fixture, mailbox_capacity, call_capacity, false);
 }
 
 static void fixture_drive_until(
