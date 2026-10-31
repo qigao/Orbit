@@ -19,7 +19,7 @@ target_include_directories(orbit_core PUBLIC
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(orbit_core
   PUBLIC Salts::CFlow
-  PRIVATE Salts::Platform)
+  PRIVATE Salts::Platform Salts::CMeta)
 
 # Build the optional ACE adapter ONLY when explicitly requested. This is
 # a feature selection, not a find/probe/fallback against another SDK epoch.
