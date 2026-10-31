@@ -31,6 +31,12 @@ BUILT candidate outside runtime admission locking, then rechecks state/epoch
 before attachment. Drain reserves one STOPPING bundle before validation and
 teardown. These fixes retain native ABI 2.0 and the existing typed C functions.
 
+Construction failure phase, component/dependency indices and Provider status
+also survive complete generation cleanup and explicit recovery as scalar
+Configurator diagnostics. Storage and Plugin leases still settle normally;
+these error values do not retain a Provider image and reset on an admitted
+new build. No native ABI/layout or caller lifecycle API changes are required.
+
 ## Existing executable path
 
 The same native CTests exercise:
@@ -52,7 +58,7 @@ discarded hand-written DSO adapter remains absent.
 
 | Input | Identity |
 | --- | --- |
-| Salts runtime | `408c07803c84687653a7e2d1625c79a69d535f87` — Salts 4.0 / ABI 2.0, ACE / Provider targets |
+| Salts runtime | `7d57b78ba8dffacd935f87d926b97a6eb8627377` — Salts 4.0 / ABI 2.0, ACE / Provider targets |
 | Core runtime | `cfc1ed0d24364689b10ef7a85cff28d8776eb7db` — Core 0.1 |
 | Canonical host compiler | SaltsUtils `852b5cc741ef0debb1735b03e129bb30a136f038` |
 | Host artifact run | `41168655686`, Linux/Windows native SDKs |
