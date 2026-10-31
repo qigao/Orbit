@@ -112,4 +112,17 @@ if(ORBIT_IDL_CONFORMANCE)
     PRIVATE Orbit::Core Salts::Platform)
   add_test(NAME orbit.idl.generated_unary
     COMMAND orbit_generated_idl_native_test)
+
+  # The existing DSO/ACE native test consumes the SAME generated Native
+  # Contract as the local Room test. It invokes the old Plugin Provider
+  # after N+1 through the canonical receiver-bound Dispatcher, with no
+  # second generator command, test target or DSO loader.
+  if(ORBIT_BUILD_ACE)
+    target_sources(orbit_scope_dso_native_test PRIVATE
+      "${_orbit_idl_header}" "${_orbit_idl_records}")
+    target_include_directories(orbit_scope_dso_native_test PRIVATE
+      "${_orbit_idl_dir}")
+    target_compile_definitions(orbit_scope_dso_native_test PRIVATE
+      ORBIT_TEST_IDL_CONTEXT_DSO=1)
+  endif()
 endif()
