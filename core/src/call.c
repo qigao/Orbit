@@ -677,6 +677,7 @@ static bool orbit_value_type_admitted(const cmeta_data_desc *data,
         data->storage_type == NULL ||
         !cmeta_data_value_traits_supported(data) ||
         data->storage_type->size == 0u ||
+        data->storage_type->size > 65536u ||
         /* Hard limit deliberately conservative; every activation must also
          * provide its own smaller explicit total dynamic byte budget.
          */
