@@ -913,8 +913,9 @@ orbit_call_status orbit_call_value_async(
         cmeta_mutex_lock(&impl->mutex);
         --impl->submitting;
         ++impl->rejected;
-        orbit_call_release_slot_locked(slot);
+        slot->state = ORBIT_SLOT_RECLAIMING;
         cmeta_mutex_unlock(&impl->mutex);
+        orbit_call_reclaim_slot(impl, slot);
         return ORBIT_CALL_VALUE_COPY_FAILED; /* zero token, no callback */
     }
 
@@ -922,8 +923,9 @@ orbit_call_status orbit_call_value_async(
     cmeta_mutex_lock(&impl->mutex);
     if (impl->closed) {
         --impl->submitting;
-        orbit_call_release_slot_locked(slot);
+        slot->state = ORBIT_SLOT_RECLAIMING;
         cmeta_mutex_unlock(&impl->mutex);
+        orbit_call_reclaim_slot(impl, slot);
         return ORBIT_CALL_CLOSED;
     }
     cmeta_mutex_unlock(&impl->mutex);
@@ -939,7 +941,7 @@ orbit_call_status orbit_call_value_async(
     --impl->submitting;
     if (!accepted) {
         ++impl->rejected;
-        orbit_call_release_slot_locked(slot);
+        slot->state = ORBIT_SLOT_RECLAIMING;
     } else {
         ++impl->admitted;
         slot->state = ORBIT_SLOT_ACTIVE;
@@ -958,7 +960,10 @@ orbit_call_status orbit_call_value_async(
     }
     cmeta_mutex_unlock(&impl->mutex);
     *out_send = send_status;
-    if (!accepted) return ORBIT_CALL_REJECTED;
+    if (!accepted) {
+        orbit_call_reclaim_slot(impl, slot);
+        return ORBIT_CALL_REJECTED;
+    }
     *out_token = token;
     orbit_call_deliver(impl, &delivery);
     return ORBIT_CALL_OK;
