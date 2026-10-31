@@ -124,7 +124,9 @@ typedef struct dso_actor {
     databind_4_Game_4_Room__orbit_binding binding;
     databind_4_Game_4_Room_4_Ping__orbit_context ping_context;
     databind_4_Game_4_Room_4_Pong__orbit_context pong_context;
+    databind_4_Game_4_Room_4_Ping__orbit_context cancel_context;
     uint64_t first_result;
+    unsigned cancelled;
 #endif
     int state;
     unsigned observed;
@@ -158,8 +160,12 @@ static bool dso_actor_observe(
      * Real generated, contextual post-commit dispatch calls the original
      * native symbol with the scope-pinned DSO Provider receiver.
      */
-    CHECK(databind_4_Game_4_Room__orbit_dispatch(
-        &actor->binding, token) == ORBIT_CALL_OK);
+    {
+        const orbit_call_status step =
+            databind_4_Game_4_Room__orbit_dispatch(&actor->binding, token);
+        /* A previously cancelled local call is a stale generation token. */
+        CHECK(step == ORBIT_CALL_OK || step == ORBIT_CALL_STALE);
+    }
 #else
     {
         uint64_t request = 0u;
@@ -213,6 +219,16 @@ static void dso_generated_pong_done(
     CHECK(application_status == 0);
     actor->last_result = response->ack;
     ++actor->callbacks;
+}
+
+static void dso_generated_cancel_done(
+    void *user, uint64_t token, orbit_call_terminal terminal,
+    int application_status, const PingResponse *response) {
+    dso_actor *actor = (dso_actor *)user;
+    CHECK(actor != NULL && token != 0u);
+    CHECK(terminal == ORBIT_CALL_TERMINAL_CANCELLED);
+    CHECK(application_status == 0 && response == NULL);
+    ++actor->cancelled;
 }
 #else
 static void dso_actor_on_reply(void *user, uint64_t token,
@@ -349,6 +365,10 @@ int main(void) {
     orbit_ace_scope_guard next_scope = {0};
     salts_service_host_status exact = SALTS_SERVICE_HOST_OK;
     dso_actor actor;
+#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
+    dso_actor successor_actor;
+    uint64_t successor_ping_token = 0u;
+#endif
     uint64_t actor_token = 0u;
     cflow_actor_send_status actor_send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
     unsigned rounds = 0u;
@@ -390,6 +410,19 @@ int main(void) {
     CHECK(orbit_ace_scope_guard_open(
         &next_scope, &runtime, UINT64_C(22), &exact) == ORBIT_ACE_SCOPE_OK);
     CHECK(actual_provider_value(&next_scope) == 83);
+#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
+    /*
+     * Both generations own live, independently scheduled generated Rooms.
+     * The second Room MUST acquire its receiver from the newly published
+     * Scope, not rebind N's pre-existing receiver or method catalog.
+     */
+    dso_actor_start(&successor_actor, &next_scope);
+    CHECK(successor_actor.binding.receiver != actor.binding.receiver);
+    CHECK(successor_actor.producer.actor.impl != actor.producer.actor.impl);
+    CHECK(orbit_ace_scope_guard_generation_id(&next_scope) == UINT64_C(22));
+    CHECK(orbit_ace_scope_guard_try_release(&next_scope, &exact) ==
+          ORBIT_ACE_SCOPE_BUSY);
+#endif
     /* Old provider still executes from its original loaded DSO. */
     CHECK(actual_provider_value(&old_scope) == 37);
     CHECK(salts_service_host_generation_drain(
@@ -407,25 +440,76 @@ int main(void) {
     {
         PingRequest ping = {UINT64_C(5)};
         PingRequest pong = {UINT64_C(7)};
-        uint64_t pong_token = 0u;
+        PingRequest cancel_request = {UINT64_C(1)};
+        uint64_t old_pong_token = 0u;
+        uint64_t successor_pong_token = 0u;
+        uint64_t cancel_token = 0u;
+
+        /* Same IDL and method IDs; different immutable Scope generations. */
         CHECK(databind_4_Game_4_Room_4_Ping__orbit_call_async(
             &actor.port, &actor.producer, &ping, &actor.ping_context,
             dso_generated_ping_done, &actor, &actor_token, &actor_send) ==
             ORBIT_CALL_OK);
         CHECK(actor_send == CFLOW_ACTOR_SEND_ACCEPTED);
-        CHECK(databind_4_Game_4_Room_4_Pong__orbit_call_async(
-            &actor.port, &actor.producer, &pong, &actor.pong_context,
-            dso_generated_pong_done, &actor, &pong_token, &actor_send) ==
+        CHECK(databind_4_Game_4_Room_4_Ping__orbit_call_async(
+            &successor_actor.port, &successor_actor.producer, &ping,
+            &successor_actor.ping_context, dso_generated_ping_done,
+            &successor_actor, &successor_ping_token, &actor_send) ==
             ORBIT_CALL_OK);
         CHECK(actor_send == CFLOW_ACTOR_SEND_ACCEPTED);
-        while (actor.callbacks < 2u && rounds++ < 2048u)
+        CHECK(databind_4_Game_4_Room_4_Pong__orbit_call_async(
+            &actor.port, &actor.producer, &pong, &actor.pong_context,
+            dso_generated_pong_done, &actor, &old_pong_token, &actor_send) ==
+            ORBIT_CALL_OK);
+        CHECK(actor_send == CFLOW_ACTOR_SEND_ACCEPTED);
+        CHECK(databind_4_Game_4_Room_4_Pong__orbit_call_async(
+            &successor_actor.port, &successor_actor.producer, &pong,
+            &successor_actor.pong_context, dso_generated_pong_done,
+            &successor_actor, &successor_pong_token, &actor_send) ==
+            ORBIT_CALL_OK);
+        CHECK(actor_send == CFLOW_ACTOR_SEND_ACCEPTED);
+        CHECK(actor_token && old_pong_token &&
+              successor_ping_token && successor_pong_token);
+
+        while ((actor.callbacks < 2u || successor_actor.callbacks < 2u) &&
+               rounds++ < 2048u) {
             (void)cflow_executor_run_one(&actor.executor);
+            (void)cflow_executor_run_one(&successor_actor.executor);
+        }
         CHECK(actor.callbacks == 2u && actor.observed == 2u);
-        CHECK(actor.errors == 0u);
+        CHECK(successor_actor.callbacks == 2u &&
+              successor_actor.observed == 2u);
+        CHECK(actor.errors == 0u && successor_actor.errors == 0u);
         CHECK(actor.first_result == UINT64_C(42));
         CHECK(actor.last_result == UINT64_C(144));
+        CHECK(successor_actor.first_result == UINT64_C(88));
+        CHECK(successor_actor.last_result == UINT64_C(190));
         CHECK(actor.receiver.invocations == 2u);
+        CHECK(successor_actor.receiver.invocations == 2u);
         CHECK(orbit_call_u64_observe(&actor.port, actor_token) ==
+              ORBIT_CALL_STALE);
+        CHECK(orbit_call_u64_observe(
+            &successor_actor.port, successor_ping_token) == ORBIT_CALL_STALE);
+
+        /* Cancel an accepted N call before owner progress: exactly one
+         * CANCELLED terminal, no N business invocation or N+1 mutation.
+         */
+        CHECK(databind_4_Game_4_Room_4_Ping__orbit_call_async(
+            &actor.port, &actor.producer, &cancel_request,
+            &actor.cancel_context, dso_generated_cancel_done,
+            &actor, &cancel_token, &actor_send) == ORBIT_CALL_OK);
+        CHECK(actor_send == CFLOW_ACTOR_SEND_ACCEPTED);
+        CHECK(orbit_call_u64_cancel(&actor.port, cancel_token) ==
+              ORBIT_CALL_OK);
+        CHECK(actor.cancelled == 1u);
+        rounds = 0u;
+        while (actor.observed < 3u && rounds++ < 2048u)
+            (void)cflow_executor_run_one(&actor.executor);
+        CHECK(actor.observed == 3u && actor.callbacks == 2u);
+        CHECK(actor.cancelled == 1u && actor.errors == 0u);
+        CHECK(actor.receiver.invocations == 2u);
+        CHECK(successor_actor.receiver.invocations == 2u);
+        CHECK(orbit_call_u64_cancel(&actor.port, cancel_token) ==
               ORBIT_CALL_STALE);
     }
 #else
@@ -459,11 +543,45 @@ int main(void) {
     CHECK(cmeta_plugin_registry_unload(
         &registry, original) == CMETA_PLUGIN_OK);
 
+#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
+    {
+        /*
+         * Old N's real DSO is already unloaded. A still-active N+1
+         * generated Room must continue through its own Scope-pinned vtable.
+         */
+        PingRequest after_old_unload = {UINT64_C(1)};
+        uint64_t token = 0u;
+        rounds = 0u;
+        CHECK(databind_4_Game_4_Room_4_Ping__orbit_call_async(
+            &successor_actor.port, &successor_actor.producer,
+            &after_old_unload, &successor_actor.ping_context,
+            dso_generated_ping_done, &successor_actor,
+            &token, &actor_send) == ORBIT_CALL_OK);
+        CHECK(actor_send == CFLOW_ACTOR_SEND_ACCEPTED);
+        while (successor_actor.callbacks < 3u && rounds++ < 2048u)
+            (void)cflow_executor_run_one(&successor_actor.executor);
+        CHECK(successor_actor.callbacks == 3u);
+        CHECK(successor_actor.first_result == UINT64_C(84));
+        CHECK(successor_actor.receiver.invocations == 3u);
+        CHECK(successor_actor.errors == 0u);
+        CHECK(orbit_call_u64_observe(
+            &successor_actor.port, successor_ping_token) ==
+              ORBIT_CALL_STALE);
+    }
+#endif
+
     CHECK(salts_service_host_runtime_close(
         &runtime, &previous) == SALTS_SERVICE_HOST_OK);
     CHECK(previous == &next.generation);
     CHECK(salts_service_host_generation_drain(
         &runtime, &next.generation) == SALTS_SERVICE_HOST_BUSY);
+#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
+    dso_actor_stop(&successor_actor);
+    CHECK(orbit_ace_scope_guard_try_release(
+        &next_scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
+    CHECK(orbit_call_port_try_destroy(&successor_actor.port) ==
+          ORBIT_CALL_OK);
+#endif
     CHECK(orbit_ace_scope_guard_try_release(
         &next_scope, &exact) == ORBIT_ACE_SCOPE_OK);
     CHECK(salts_service_host_generation_drain(
