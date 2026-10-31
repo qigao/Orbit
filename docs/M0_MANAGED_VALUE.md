@@ -114,3 +114,46 @@ concurrent cancellation and Scope retirement. Those gates stay open
 until tested in the original ServiceHost ABI-2 DSO test graph. No
 new test executable, extra CI workflow, second runtime, hidden
 scheduler, old ComponentProvider binding or fallback.
+
+
+## M0k.2c genuine managed Provider N→N+1 DSO acceptance
+
+The existing orbit.ace.dso_native test now executes an additional,
+separate, genuine ServiceHost runtime instance after retiring the original
+scalar M0i/M0j fixture. This preserves those scalar lifetime-race proofs:
+no extra managed Scope can make their generation-drain/BUSY assertions
+trivially true. It does not introduce a second Plugin implementation,
+loader, Actor/scheduler backend, CTest executable or CI workflow.
+
+Both real old-N and new-N Plugin DSOs are loaded and two independent
+OwnedGame.Room.Echo generated CFlow Rooms are bound via separate original
+ServiceHost Scope leases to the immutable old/new Provider objects.
+The sole canonical salts-idlc emits the owning typed Client, receiver-bound
+Dispatcher and CMeta VALUE Port binding. OwnedPacket owns string label and
+raw bytes, while only a uint64 generation token enters the CFlow Mailbox.
+
+- Real Provider N method returns 37, N+1 returns 83. Both generated methods
+  read original Room-A and raw 00 ff 42 80 after caller-owned request
+  destruction and mutation of original scratch bytes. The generated results
+  remain independent and owned, and exactly one SUCCESS callback is emitted.
+  An extra request on the capacity-one old Port is FULL with zero token and
+  no callback.
+- The next old-N managed request is accepted and pauses after entering the
+  canonical generated Native business symbol but *before* calling the old
+  DSO vtable. A separate native thread cancels and sees one CANCELLED
+  terminal while executing=1 and occupied=1. Original Scope release,
+  generation drain and real Plugin unload must all remain BUSY.
+- After CANCELLED callback return, native business must still safely read
+  Port-owned label and bytes, invoke the real old N DSO vtable, release its
+  execution borrow and never publish a second SUCCESS reply.
+- Only after the old-N Actor, owned CallPort and Scope retire can generation
+  N drain and its actual Plugin DSO unload. N+1 remains live throughout:
+  with N code unloaded, it must execute a new generated owning VALUE call
+  through its separately retained N+1 DSO Scope. It then drains and unloads.
+
+The preexisting scalar N→N+1 fixture still runs independently and first.
+This test qualifies only the narrow local managed CFlow/DSO owner and terminal
+boundary; it is not a claim of arbitrary nested managed graphs, every
+thread interleaving, TSan, Streaming, remote exactly-once, or persistent
+business COMMIT/ACK. Exact-head Linux/Windows native CTests remain the
+authority. Keep the new PR Draft until actual CI has run.
