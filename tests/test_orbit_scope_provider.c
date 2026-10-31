@@ -146,6 +146,9 @@ typedef struct actor_fixture {
     orbit_service_ref producer;
     orbit_call_port calls;
     orbit_ace_scope_guard *guard;
+    orbit_ace_native_activation activation;
+    orbit_test_value projected;
+    bool verify_reentry;
     cflow_machine_action_binding action;
     orbit_service_method method;
     int state;
@@ -170,8 +173,6 @@ static bool machine_token(
 static bool actor_observe(
     void *user, const cmeta_type_desc *type, const void *value) {
     actor_fixture *a = (actor_fixture *)user;
-    salts_configurator_service service;
-    orbit_test_value provider;
     uint64_t request = 0u;
     uint64_t token;
     int old_value;
@@ -181,13 +182,11 @@ static bool actor_observe(
     CHECK(orbit_call_u64_request(
         &a->calls, token, UINT64_C(10), &request) == ORBIT_CALL_OK);
 
-    CHECK(orbit_ace_scope_guard_find_service(
-        a->guard, orbit_test_value_interface(), &service) ==
-        SALTS_SERVICE_HOST_OK);
-    provider = orbit_test_value_bind(NULL, NULL);
-    CHECK(orbit_test_value_borrow_from_object(
-        service.object, service.interfaces, &provider) == CMETA_OK);
-    old_value = orbit_test_value_get(&provider);
+    /* Already acquired from the original Scope during serialized activation.
+     * No Provider lookup/reflection inside post-commit Actor progress.
+     */
+    CHECK(orbit_test_value_valid(&a->projected));
+    old_value = orbit_test_value_get(&a->projected);
 
     CHECK(orbit_call_u64_stage_reply(
         &a->calls, token, UINT64_C(10), 0,
@@ -220,6 +219,62 @@ static void call_finished(
     CHECK(application_status == 0);
     ++a->terminals;
     a->response = response;
+}
+
+/* This trusted application initializer is called by the original Scope
+ * with ONLY its actual CMeta Provider projection. It cannot pick an N+1
+ * projection when N owns the guard. The test checks original Scope release
+ * cannot reenter and free the Provider while initialization runs.
+ */
+static bool actor_native_receiver_init(
+    void *user, const cmeta_interface_projection *projection,
+    void **out_receiver) {
+    actor_fixture *actor = (actor_fixture *)user;
+    salts_service_host_status exact = SALTS_SERVICE_HOST_OK;
+    if (!actor || !out_receiver ||
+        !cmeta_interface_projection_valid_for(
+            projection, orbit_test_value_interface()))
+        return false;
+    *out_receiver = NULL;
+    if (actor->verify_reentry) {
+        CHECK(orbit_ace_scope_guard_try_release(
+            actor->guard, &exact) == ORBIT_ACE_SCOPE_BUSY);
+        CHECK(orbit_ace_scope_guard_bind(
+            actor->guard, &actor->service, &actor->calls) ==
+              ORBIT_ACE_SCOPE_BUSY);
+    }
+    actor->projected = orbit_test_value_bind(
+        projection->self,
+        (const orbit_test_value_vtable *)projection->dispatch);
+    if (!orbit_test_value_valid(&actor->projected)) return false;
+    *out_receiver = actor;
+    return true;
+}
+
+/* Test-only trusted initializer failures never publish an activation
+ * ticket, bind a Scope, or retain an extra Provider lease.
+ */
+static bool actor_reject_receiver_init(
+    void *user, const cmeta_interface_projection *projection,
+    void **out_receiver) {
+    (void)user;
+    (void)projection;
+    if (out_receiver) *out_receiver = NULL;
+    return false;
+}
+
+/* A Provider/application callback is external code and may close the exact
+ * CallPort. Activation MUST check admission a second time after callback.
+ */
+static bool actor_close_during_receiver_init(
+    void *user, const cmeta_interface_projection *projection,
+    void **out_receiver) {
+    actor_fixture *actor = (actor_fixture *)user;
+    if (!actor_native_receiver_init(user, projection, out_receiver))
+        return false;
+    CHECK(orbit_call_port_close(
+        &actor->calls, ORBIT_CALL_TERMINAL_STOPPED) == ORBIT_CALL_OK);
+    return true;
 }
 
 static void actor_prepare(actor_fixture *a, orbit_ace_scope_guard *guard,
@@ -271,10 +326,29 @@ static void actor_prepare(actor_fixture *a, orbit_ace_scope_guard *guard,
           ORBIT_CALL_OK);
     CHECK(orbit_service_ref_acquire(&a->service, &a->producer));
     if (bind_scope) {
-        CHECK(orbit_ace_scope_guard_bind(
-            guard, &a->service, &a->calls) == ORBIT_ACE_SCOPE_OK);
+        void *receiver = NULL;
+        a->verify_reentry = true;
+        CHECK(orbit_ace_scope_guard_activate_native(
+            guard, &a->service, &a->calls, orbit_test_value_interface(),
+            actor_native_receiver_init, a, &a->activation) ==
+              ORBIT_ACE_SCOPE_OK);
+        CHECK(a->activation.source != NULL);
+        CHECK(orbit_ace_native_activation_receiver(
+            guard, &a->activation, &a->service, &a->calls, &receiver) ==
+              ORBIT_ACE_SCOPE_OK);
+        CHECK(receiver == a);
         CHECK(orbit_ace_scope_guard_bind(
             guard, &a->service, &a->calls) == ORBIT_ACE_SCOPE_ALREADY_BOUND);
+    } else {
+        /* Test-only deliberately unbound Actor in the M0k.2h negative
+         * admission fixture. This is not the production activation path.
+         */
+        salts_configurator_service provider = {0};
+        CHECK(orbit_ace_scope_guard_find_service(
+            guard, orbit_test_value_interface(), &provider) ==
+            SALTS_SERVICE_HOST_OK);
+        CHECK(orbit_test_value_borrow_from_object(
+            provider.object, provider.interfaces, &a->projected) == CMETA_OK);
     }
 }
 
@@ -318,6 +392,14 @@ static void test_provider_actor_scope_pin(void) {
     CHECK(orbit_ace_scope_guard_open(
         &guard, &host, UINT64_C(11), &native) == ORBIT_ACE_SCOPE_OK);
     actor_prepare(&actor, &guard, true);
+    {
+        void *wrong = &actor;
+        orbit_ace_native_activation forged = {&actor};
+        CHECK(orbit_ace_native_activation_receiver(
+            &guard, &forged, &actor.service, &actor.calls, &wrong) ==
+              ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+        CHECK(wrong == NULL);
+    }
     CHECK(orbit_ace_scope_guard_try_release(&guard, &native) ==
           ORBIT_ACE_SCOPE_BUSY);
 
@@ -418,12 +500,56 @@ static void test_scope_binding_requires_unused_live_port(void) {
         &next_scope, &late_actor.service, &closed_actor.calls) ==
           ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
 
+    {
+        orbit_ace_native_activation attempted = {0};
+        CHECK(orbit_ace_scope_guard_activate_native(
+            &old_scope, &closed_actor.service, &late_actor.calls,
+            orbit_test_value_interface(), actor_native_receiver_init,
+            &closed_actor, &attempted) ==
+              ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+        CHECK(attempted.source == NULL);
+    }
+
+    /* The scoped CMeta initializer closes its own never-admitted Port
+     * while activation is in flight. No ticket may be published.
+     */
+    {
+        orbit_ace_native_activation attempted = {0};
+        CHECK(orbit_ace_scope_guard_activate_native(
+            &old_scope, &closed_actor.service, &closed_actor.calls,
+            orbit_test_value_interface(), actor_close_during_receiver_init,
+            &closed_actor, &attempted) ==
+              ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+        CHECK(attempted.source == NULL);
+    }
     /* No calls have been admitted; a CLOSED Port still cannot bind. */
     CHECK(orbit_call_port_close(
         &closed_actor.calls, ORBIT_CALL_TERMINAL_STOPPED) == ORBIT_CALL_OK);
     CHECK(orbit_ace_scope_guard_bind(
         &old_scope, &closed_actor.service, &closed_actor.calls) ==
           ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+    {
+        orbit_ace_native_activation attempted = {0};
+        CHECK(orbit_ace_scope_guard_activate_native(
+            &old_scope, &closed_actor.service, &closed_actor.calls,
+            orbit_test_value_interface(), actor_native_receiver_init,
+            &closed_actor, &attempted) ==
+              ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+        CHECK(attempted.source == NULL);
+    }
+
+    /* A failing receiver factory leaves the same original Scope free
+     * to attempt activation again, not half-published or leaked.
+     */
+    {
+        orbit_ace_native_activation attempted = {&late_actor};
+        CHECK(orbit_ace_scope_guard_activate_native(
+            &next_scope, &late_actor.service, &late_actor.calls,
+            orbit_test_value_interface(), actor_reject_receiver_init,
+            &late_actor, &attempted) ==
+              ORBIT_ACE_SCOPE_RECEIVER_REJECTED);
+        CHECK(attempted.source == NULL);
+    }
 
     /* An accepted call must not be retroactively attached to a Scope. */
     CHECK(orbit_call_u64_async(
@@ -433,6 +559,15 @@ static void test_scope_binding_requires_unused_live_port(void) {
     CHECK(orbit_ace_scope_guard_bind(
         &next_scope, &late_actor.service, &late_actor.calls) ==
           ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+    {
+        orbit_ace_native_activation attempted = {0};
+        CHECK(orbit_ace_scope_guard_activate_native(
+            &next_scope, &late_actor.service, &late_actor.calls,
+            orbit_test_value_interface(), actor_native_receiver_init,
+            &late_actor, &attempted) ==
+              ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+        CHECK(attempted.source == NULL);
+    }
     while (late_actor.terminals == 0u && rounds++ < 2048u)
         (void)cflow_executor_run_one(&late_actor.executor);
     CHECK(late_actor.terminals == 1u && late_actor.observed == 1u);
@@ -463,8 +598,103 @@ static void test_scope_binding_requires_unused_live_port(void) {
     CHECK(n.provider.destroyed == 1u && next.provider.destroyed == 1u);
 }
 
+
+/* Two real CMeta Scope/Provider generations mint independent Native receiver
+ * identities, even though they expose the same interface schema/method IDs.
+ * The original owner keeps both Provider leases until Actors and Ports retire.
+ */
+static void test_native_activation_generation_identity(void) {
+    static_generation_fixture n = {0};
+    static_generation_fixture next = {0};
+    salts_service_host_runtime host = SALTS_SERVICE_HOST_RUNTIME_INIT;
+    salts_service_host_generation *retired = NULL;
+    salts_service_host_status exact = SALTS_SERVICE_HOST_OK;
+    orbit_ace_scope_guard old_scope = {0}, next_scope = {0};
+    actor_fixture old_actor, new_actor;
+    void *receiver = NULL;
+    unsigned rounds = 0u;
+    uint64_t old_token = 0u, new_token = 0u;
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+
+    generation_prepare(&n, UINT64_C(31), 7);
+    generation_prepare(&next, UINT64_C(32), 101);
+    CHECK(salts_service_host_runtime_init(&host) == SALTS_SERVICE_HOST_OK);
+    CHECK(salts_service_host_runtime_publish(
+        &host, &n.generation, &retired) == SALTS_SERVICE_HOST_OK);
+    CHECK(orbit_ace_scope_guard_open(
+        &old_scope, &host, UINT64_C(31), &exact) == ORBIT_ACE_SCOPE_OK);
+    actor_prepare(&old_actor, &old_scope, true);
+    CHECK(salts_service_host_runtime_publish(
+        &host, &next.generation, &retired) == SALTS_SERVICE_HOST_OK);
+    CHECK(retired == &n.generation);
+    CHECK(orbit_ace_scope_guard_open(
+        &next_scope, &host, UINT64_C(32), &exact) == ORBIT_ACE_SCOPE_OK);
+    actor_prepare(&new_actor, &next_scope, true);
+
+    CHECK(old_actor.activation.source != new_actor.activation.source);
+    CHECK(old_actor.projected.self != new_actor.projected.self);
+    CHECK(orbit_ace_native_activation_receiver(
+        &old_scope, &new_actor.activation, &old_actor.service,
+        &old_actor.calls, &receiver) == ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+    CHECK(receiver == NULL);
+    CHECK(orbit_ace_native_activation_receiver(
+        &next_scope, &old_actor.activation, &new_actor.service,
+        &new_actor.calls, &receiver) == ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+    CHECK(receiver == NULL);
+    CHECK(orbit_ace_native_activation_receiver(
+        &old_scope, &old_actor.activation, &new_actor.service,
+        &new_actor.calls, &receiver) == ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+    CHECK(receiver == NULL);
+    CHECK(orbit_ace_native_activation_receiver(
+        &old_scope, &old_actor.activation, &old_actor.service,
+        &new_actor.calls, &receiver) == ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+    CHECK(receiver == NULL);
+
+    CHECK(orbit_call_u64_async(
+        &old_actor.calls, &old_actor.producer, UINT64_C(10), UINT64_C(5),
+        call_finished, &old_actor, &old_token, &send) == ORBIT_CALL_OK);
+    CHECK(send == CFLOW_ACTOR_SEND_ACCEPTED);
+    CHECK(orbit_call_u64_async(
+        &new_actor.calls, &new_actor.producer, UINT64_C(10), UINT64_C(5),
+        call_finished, &new_actor, &new_token, &send) == ORBIT_CALL_OK);
+    CHECK(send == CFLOW_ACTOR_SEND_ACCEPTED);
+    while ((old_actor.terminals == 0u || new_actor.terminals == 0u) &&
+           rounds++ < 2048u) {
+        (void)cflow_executor_run_one(&old_actor.executor);
+        (void)cflow_executor_run_one(&new_actor.executor);
+    }
+    CHECK(old_actor.terminals == 1u && new_actor.terminals == 1u);
+    CHECK(old_actor.response == UINT64_C(12));
+    CHECK(new_actor.response == UINT64_C(106));
+    CHECK(salts_service_host_generation_drain(
+        &host, &n.generation) == SALTS_SERVICE_HOST_BUSY);
+
+    actor_close(&old_actor);
+    actor_close(&new_actor);
+    CHECK(orbit_call_port_try_destroy(&old_actor.calls) == ORBIT_CALL_OK);
+    CHECK(orbit_call_port_try_destroy(&new_actor.calls) == ORBIT_CALL_OK);
+    CHECK(orbit_ace_scope_guard_try_release(
+        &old_scope, &exact) == ORBIT_ACE_SCOPE_OK);
+    CHECK(orbit_ace_native_activation_receiver(
+        &old_scope, &old_actor.activation, &old_actor.service,
+        &old_actor.calls, &receiver) == ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+    CHECK(receiver == NULL);
+    CHECK(orbit_ace_scope_guard_try_release(
+        &next_scope, &exact) == ORBIT_ACE_SCOPE_OK);
+    CHECK(salts_service_host_generation_drain(
+        &host, &n.generation) == SALTS_SERVICE_HOST_OK);
+    CHECK(salts_service_host_runtime_close(
+        &host, &retired) == SALTS_SERVICE_HOST_OK);
+    CHECK(retired == &next.generation);
+    CHECK(salts_service_host_generation_drain(
+        &host, &next.generation) == SALTS_SERVICE_HOST_OK);
+    CHECK(salts_service_host_runtime_destroy(&host) == SALTS_SERVICE_HOST_OK);
+    CHECK(n.provider.destroyed == 1u && next.provider.destroyed == 1u);
+}
+
 int main(void) {
     test_provider_actor_scope_pin();
     test_scope_binding_requires_unused_live_port();
+    test_native_activation_generation_identity();
     return 0;
 }

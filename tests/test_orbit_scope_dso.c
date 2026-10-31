@@ -134,6 +134,7 @@ typedef struct dso_actor {
     orbit_call_port port;
     cflow_machine_action_binding action[2];
     dso_room_receiver receiver;
+    orbit_ace_native_activation activation;
     databind_4_Game_4_Room__orbit_binding binding;
     databind_4_Game_4_Room_4_Ping__orbit_context ping_context;
     databind_4_Game_4_Room_4_Pong__orbit_context pong_context;
@@ -238,6 +239,27 @@ static void dso_generated_cancel_done(
     ++actor->cancelled;
 }
 
+/* The Provider projection is minted by this ACTOR's original Scope, not
+ * supplied as an unrelated native pointer by the application.
+ */
+static bool dso_actor_init_receiver(
+    void *user, const cmeta_interface_projection *projection,
+    void **out_receiver) {
+    dso_actor *actor = (dso_actor *)user;
+    if (!actor || !out_receiver ||
+        !cmeta_interface_projection_valid_for(
+            projection, orbit_dso_value_interface()))
+        return false;
+    *out_receiver = NULL;
+    actor->receiver.projected = orbit_dso_value_bind(
+        projection->self,
+        (const orbit_dso_value_vtable *)projection->dispatch);
+    if (!orbit_dso_value_valid(&actor->receiver.projected))
+        return false;
+    *out_receiver = &actor->receiver;
+    return true;
+}
+
 static void dso_actor_start(dso_actor *actor, orbit_ace_scope_guard *scope) {
     const cflow_machine_state states[] = {
         {1u, &cmeta_type_int, CFLOW_MACHINE_STATE_ACTIVE}
@@ -303,20 +325,22 @@ static void dso_actor_start(dso_actor *actor, orbit_ace_scope_guard *scope) {
         &actor->service, &actor->producer));
 
     {
-        salts_configurator_service service;
-        orbit_dso_value view = orbit_dso_value_bind(NULL, NULL);
-        CHECK(orbit_ace_scope_guard_find_service(
-            scope, orbit_dso_value_interface(), &service) ==
-            SALTS_SERVICE_HOST_OK);
-        CHECK(orbit_dso_value_borrow_from_object(
-            service.object, service.interfaces, &view) == CMETA_OK);
-        actor->receiver.projected = view;
+        void *receiver = NULL;
+        CHECK(orbit_ace_scope_guard_activate_native(
+            scope, &actor->service, &actor->port,
+            orbit_dso_value_interface(), dso_actor_init_receiver,
+            actor, &actor->activation) == ORBIT_ACE_SCOPE_OK);
+        CHECK(orbit_ace_native_activation_receiver(
+            scope, &actor->activation, &actor->service, &actor->port,
+            &receiver) == ORBIT_ACE_SCOPE_OK);
+        CHECK(receiver == &actor->receiver);
+        /* Same generated Native Context-v1 Dispatcher and business symbol.
+         * Only its activation-time receiver source is now Scope-minted.
+         */
         CHECK(databind_4_Game_4_Room__orbit_bind(
-            &actor->binding, &actor->port, &actor->receiver));
-        CHECK(actor->binding.receiver == &actor->receiver);
+            &actor->binding, &actor->port, receiver));
+        CHECK(actor->binding.receiver == receiver);
     }
-    CHECK(orbit_ace_scope_guard_bind(
-        scope, &actor->service, &actor->port) == ORBIT_ACE_SCOPE_OK);
 }
 
 static void dso_actor_stop(dso_actor *actor) {
@@ -483,6 +507,7 @@ typedef struct dso_owned_actor {
     orbit_call_port port;
     cflow_machine_action_binding action[1];
     dso_owned_receiver receiver;
+    orbit_ace_native_activation activation;
     databind_9_OwnedGame_4_Room_4_Echo__orbit_value_owner value_owner;
     databind_9_OwnedGame_4_Room_4_Echo__orbit_context context;
     databind_9_OwnedGame_4_Room_4_Echo__orbit_context rejected_context;
@@ -547,6 +572,24 @@ static void dso_owned_done(
     }
 }
 
+static bool dso_owned_actor_init_receiver(
+    void *user, const cmeta_interface_projection *projection,
+    void **out_receiver) {
+    dso_owned_actor *actor = (dso_owned_actor *)user;
+    if (!actor || !out_receiver ||
+        !cmeta_interface_projection_valid_for(
+            projection, orbit_dso_value_interface()))
+        return false;
+    *out_receiver = NULL;
+    actor->receiver.projected = orbit_dso_value_bind(
+        projection->self,
+        (const orbit_dso_value_vtable *)projection->dispatch);
+    if (!orbit_dso_value_valid(&actor->receiver.projected))
+        return false;
+    *out_receiver = &actor->receiver;
+    return true;
+}
+
 static void dso_owned_actor_start(
     dso_owned_actor *actor, orbit_ace_scope_guard *scope, uint8_t marker) {
     const cflow_machine_state states[] = {
@@ -570,8 +613,7 @@ static void dso_owned_actor_start(
     };
     cflow_actor_config config = {0};
     orbit_service_config service_config;
-    salts_configurator_service provider;
-    orbit_dso_value view = orbit_dso_value_bind(NULL, NULL);
+    void *bound_receiver = NULL;
     memset(actor, 0, sizeof(*actor));
     actor->receiver.marker = marker;
     atomic_init(&actor->receiver.hold_before_provider, false);
@@ -602,16 +644,16 @@ static void dso_owned_actor_start(
           ORBIT_CALL_OK);
     CHECK(orbit_service_ref_acquire(&actor->service, &actor->producer));
 
-    CHECK(orbit_ace_scope_guard_find_service(
-        scope, orbit_dso_value_interface(), &provider) ==
-          SALTS_SERVICE_HOST_OK);
-    CHECK(orbit_dso_value_borrow_from_object(
-        provider.object, provider.interfaces, &view) == CMETA_OK);
-    actor->receiver.projected = view;
+    CHECK(orbit_ace_scope_guard_activate_native(
+        scope, &actor->service, &actor->port,
+        orbit_dso_value_interface(), dso_owned_actor_init_receiver,
+        actor, &actor->activation) == ORBIT_ACE_SCOPE_OK);
+    CHECK(orbit_ace_native_activation_receiver(
+        scope, &actor->activation, &actor->service, &actor->port,
+        &bound_receiver) == ORBIT_ACE_SCOPE_OK);
+    CHECK(bound_receiver == &actor->receiver);
     CHECK(databind_9_OwnedGame_4_Room__orbit_bind(
-        &actor->binding, &actor->port, &actor->receiver));
-    CHECK(orbit_ace_scope_guard_bind(
-        scope, &actor->service, &actor->port) == ORBIT_ACE_SCOPE_OK);
+        &actor->binding, &actor->port, bound_receiver));
 }
 
 static void dso_owned_actor_run_until(
@@ -730,6 +772,14 @@ static void test_managed_dso_lifecycle(void) {
         &next_scope, &runtime, UINT64_C(22), &exact) == ORBIT_ACE_SCOPE_OK);
     dso_owned_actor_start(&new_actor, &next_scope, 83u);
     CHECK(old_actor.binding.receiver != new_actor.binding.receiver);
+    CHECK(old_actor.activation.source != new_actor.activation.source);
+    {
+        void *wrong = &old_actor;
+        CHECK(orbit_ace_native_activation_receiver(
+            &n_scope, &new_actor.activation, &old_actor.service,
+            &old_actor.port, &wrong) == ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+        CHECK(wrong == NULL);
+    }
     CHECK(old_actor.producer.actor.impl != new_actor.producer.actor.impl);
     CHECK(orbit_ace_scope_guard_generation_id(&n_scope) == UINT64_C(21));
     CHECK(orbit_ace_scope_guard_generation_id(&next_scope) == UINT64_C(22));
@@ -923,6 +973,20 @@ int main(void) {
      */
     dso_actor_start(&successor_actor, &next_scope);
     CHECK(successor_actor.binding.receiver != actor.binding.receiver);
+    CHECK(successor_actor.activation.source != actor.activation.source);
+    {
+        void *wrong = &actor;
+        CHECK(orbit_ace_native_activation_receiver(
+            &old_scope, &successor_actor.activation,
+            &actor.service, &actor.port, &wrong) ==
+              ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+        CHECK(wrong == NULL);
+        CHECK(orbit_ace_native_activation_receiver(
+            &next_scope, &actor.activation,
+            &successor_actor.service, &successor_actor.port, &wrong) ==
+              ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+        CHECK(wrong == NULL);
+    }
     CHECK(successor_actor.producer.actor.impl != actor.producer.actor.impl);
     CHECK(orbit_ace_scope_guard_generation_id(&next_scope) == UINT64_C(22));
     CHECK(orbit_ace_scope_guard_try_release(&next_scope, &exact) ==

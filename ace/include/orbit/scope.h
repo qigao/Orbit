@@ -2,6 +2,7 @@
 #define ORBIT_ACE_SCOPE_H
 
 #include <orbit/call.h>
+#include <cmeta/object_interface.h>
 #include <salts/service_host.h>
 
 #include <stdbool.h>
@@ -37,7 +38,9 @@ typedef enum orbit_ace_scope_status {
     ORBIT_ACE_SCOPE_HOST_ERROR,
     ORBIT_ACE_SCOPE_GENERATION_MISMATCH,
     ORBIT_ACE_SCOPE_BUSY,
-    ORBIT_ACE_SCOPE_ALREADY_BOUND
+    ORBIT_ACE_SCOPE_ALREADY_BOUND,
+    ORBIT_ACE_SCOPE_PROJECTION_REJECTED,
+    ORBIT_ACE_SCOPE_RECEIVER_REJECTED
 } orbit_ace_scope_status;
 
 /*
@@ -85,6 +88,62 @@ orbit_ace_scope_status orbit_ace_scope_guard_bind(
     orbit_ace_scope_guard *guard,
     const orbit_service *service,
     const orbit_call_port *call_port);
+
+/*
+ * M0k.2j — Scope-minted Native receiver activation.
+ *
+ * The original Salts Scope authorizes one CMeta object/interface projection
+ * before the Service has accepted a call. This is an opt-in stronger binding
+ * path for generated [native_context(1)] methods, not a second method ABI.
+ *
+ * The application's trusted initializer receives ONLY the projection
+ * actually created by the original Scope's Provider. It must construct the
+ * address-stable business receiver from this projection, then return that
+ * exact receiver address. On failure the caller must discard partial
+ * application state; Orbit does not own, copy or destroy the receiver.
+ * A callback must never publish producers or run Actor work during init.
+ *
+ * This is a runtime integration/lifetime contract for cooperative native
+ * code, not a security sandbox against a malicious application initializer.
+ * A void* receiver by itself cannot attest its internal CMeta field contents.
+ */
+typedef bool (*orbit_ace_native_receiver_init_fn)(
+    void *user, const cmeta_interface_projection *provider,
+    void **out_receiver);
+
+/*
+ * A borrowed activation identity issued only after the original Scope:
+ *   find_service -> original CMeta provider projection -> trusted init ->
+ *   exact Service/unused CallPort admission -> bind
+ * has completed. Zero initialize; do not move/retain past Scope release.
+ * No independent Plugin lease, registry, lookup or callback executor.
+ */
+typedef struct orbit_ace_native_activation {
+    const void *source;
+} orbit_ace_native_activation;
+
+orbit_ace_scope_status orbit_ace_scope_guard_activate_native(
+    orbit_ace_scope_guard *guard,
+    const orbit_service *service,
+    const orbit_call_port *call_port,
+    const cmeta_interface_desc *interface_desc,
+    orbit_ace_native_receiver_init_fn init_receiver,
+    void *user,
+    orbit_ace_native_activation *out);
+
+/*
+ * Retrieve the exact previously minted receiver ONCE while initializing
+ * the generated __orbit_binding or DataBindNativeExecution.context. The
+ * calling Scope, Service and CallPort must ALL match the original mint.
+ * A forged/empty/foreign/expired token fails closed with NULL receiver.
+ * Do not call in the post-commit per-event data path.
+ */
+orbit_ace_scope_status orbit_ace_native_activation_receiver(
+    const orbit_ace_scope_guard *guard,
+    const orbit_ace_native_activation *activation,
+    const orbit_service *service,
+    const orbit_call_port *call_port,
+    void **out_receiver);
 
 /* Returns zero for an invalid/empty guard. */
 uint64_t orbit_ace_scope_guard_generation_id(
