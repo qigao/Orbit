@@ -1,5 +1,6 @@
 #define DATABIND_NATIVE_ENABLE_ORBIT 1
 #include "game.service_native.h"
+#include "idl/room_state.h"
 
 #include <cstdint>
 #include <type_traits>
@@ -19,8 +20,10 @@ static_assert(std::is_standard_layout<databind_4_Game_4_Room_4_Ping__orbit_conte
 extern "C" int orbit_generated_cpp17_smoke(void) {
     PingRequest request{UINT64_C(14)};
     PingResponse response{};
+    orbit_room_state room{};
     if (databind_4_Game_4_Room_4_Ping(
-            &request, &response) != 0 || response.ack != UINT64_C(15))
+            &room, &request, &response) != 0 ||
+        response.ack != UINT64_C(15) || room.counter != UINT64_C(15))
         return 1;
 
     databind_4_Game_4_Room_4_Ping__orbit_context context{};

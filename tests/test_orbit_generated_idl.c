@@ -1,5 +1,6 @@
 #define DATABIND_NATIVE_ENABLE_ORBIT 1
 #include "game.service_native.h"
+#include "idl/room_state.h"
 
 #include <cflow/executor.h>
 #include <cflow/machine.h>
@@ -22,22 +23,30 @@ extern int orbit_generated_cpp17_smoke(void);
     } \
 } while (0)
 
+extern int orbit_generated_multi_room_test(void);
+
 /*
  * This source includes the REAL salts-idlc generated typed header. The
  * business methods are the original canonical NATIVE Service signatures,
  * not a duplicate reflected FunctionDesc or another scheduling engine.
  */
 int databind_4_Game_4_Room_4_Ping(
-    const PingRequest *request, PingResponse *response) {
-    if (!request || !response) return 11;
+    void *receiver, const PingRequest *request, PingResponse *response) {
+    orbit_room_state *room = (orbit_room_state *)receiver;
+    if (!room || !request || !response) return 11;
     if (request->seq == UINT64_C(999)) return 17;
-    response->ack = request->seq + UINT64_C(1);
+    room->counter += request->seq + UINT64_C(1);
+    ++room->ping_count;
+    response->ack = room->counter;
     return 0;
 }
 int databind_4_Game_4_Room_4_Pong(
-    const PingRequest *request, PingResponse *response) {
-    if (!request || !response) return 12;
-    response->ack = request->seq + UINT64_C(100);
+    void *receiver, const PingRequest *request, PingResponse *response) {
+    orbit_room_state *room = (orbit_room_state *)receiver;
+    if (!room || !request || !response) return 12;
+    room->counter += request->seq + UINT64_C(100);
+    ++room->pong_count;
+    response->ack = room->counter;
     return 0;
 }
 
@@ -49,6 +58,8 @@ typedef struct idl_fixture {
     orbit_service service;
     orbit_service_ref producer;
     orbit_call_port calls;
+    orbit_room_state room;
+    databind_4_Game_4_Room__orbit_binding binding;
     databind_4_Game_4_Room_4_Ping__orbit_context ping_context;
     databind_4_Game_4_Room_4_Pong__orbit_context pong_context;
     int state;
@@ -83,7 +94,7 @@ static bool idl_on_value(
     token = *(const uint64_t *)value;
     /* Generated canonical dispatch occurs strictly AFTER CFlow commit. */
     status = databind_4_Game_4_Room__orbit_dispatch(
-        &fixture->calls, token);
+        &fixture->binding, token);
     CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
     ++fixture->observed;
     return true;
@@ -218,6 +229,9 @@ static void test_generated_unary_dispatch(void) {
           ORBIT_SERVICE_OK);
     CHECK(orbit_call_port_init(&f.calls, &f.service, 2u) ==
           ORBIT_CALL_OK);
+    CHECK(databind_4_Game_4_Room__orbit_bind(
+        &f.binding, &f.calls, &f.room));
+    CHECK(f.binding.receiver == &f.room);
     CHECK(orbit_service_ref_acquire(&f.service, &f.producer));
 
     CHECK(databind_4_Game_4_Room_4_Ping__orbit_call_async(
@@ -242,7 +256,9 @@ static void test_generated_unary_dispatch(void) {
         (void)cflow_executor_run_one(&f.executor);
     CHECK(f.callbacks == 2u && f.observed == 2u && f.errors == 0u);
     CHECK(f.ping_reply == UINT64_C(6));
-    CHECK(f.pong_reply == UINT64_C(107));
+    CHECK(f.pong_reply == UINT64_C(113));
+    CHECK(f.room.counter == UINT64_C(113));
+    CHECK(f.room.ping_count == 1u && f.room.pong_count == 1u);
     CHECK(orbit_call_port_get_stats(&f.calls, &stats));
     CHECK(stats.completed_success == 2u && stats.occupied == 0u);
     CHECK(stats.rejected_full == 1u);
@@ -284,6 +300,8 @@ static void test_generated_unary_dispatch(void) {
     CHECK(stats.completed_success == 2u);
     CHECK(stats.completed_error == 1u);
     CHECK(stats.cancelled == 1u && stats.occupied == 0u);
+    CHECK(f.room.counter == UINT64_C(113));
+    CHECK(f.room.ping_count == 1u && f.room.pong_count == 1u);
 
     CHECK(orbit_service_request_stop(&f.service) == CFLOW_ACTOR_OK);
     rounds = 0u;
@@ -302,5 +320,6 @@ static void test_generated_unary_dispatch(void) {
 int main(void) {
     CHECK(orbit_generated_cpp17_smoke() == 0);
     test_generated_unary_dispatch();
+    CHECK(orbit_generated_multi_room_test() == 0);
     return 0;
 }
