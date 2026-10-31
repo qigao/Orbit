@@ -50,6 +50,13 @@ typedef struct test_owned_reentry_context {
 } test_owned_reentry_context;
 
 static _Atomic(test_owned_reentry_context *) test_owned_reentry_active;
+/* Extra deterministic Provider hooks exercise close while ADMITTING or
+ * STAGING without changing any Port production ABI.
+ */
+static atomic_bool test_owned_hook_admit_close;
+static atomic_bool test_owned_hook_stage_close;
+static atomic_int test_owned_admit_close_hits;
+static atomic_int test_owned_stage_close_hits;
 
 static void test_owned_reentry_unexpected_callback(
     void *user, uint64_t token, orbit_call_terminal terminal,
@@ -124,6 +131,39 @@ static cmeta_status test_owned_assign(
             CHECK(orbit_call_u64_cancel(
                 ctx->port, ctx->token) == ORBIT_CALL_OK);
             atomic_fetch_add(&ctx->copy_hits, 1);
+        }
+    }
+    {
+        test_owned_reentry_context *ctx =
+            atomic_load(&test_owned_reentry_active);
+        if (ctx != NULL &&
+            atomic_exchange(&test_owned_hook_admit_close, false)) {
+            orbit_call_port_stats stats = {0};
+            CHECK(orbit_call_port_get_stats(ctx->port, &stats));
+            CHECK(stats.admitting == 1u && stats.occupied == 1u);
+            CHECK(stats.admitted == 0u && stats.executing == 0u);
+            CHECK(orbit_call_port_close(
+                ctx->port, ORBIT_CALL_TERMINAL_STOPPED) == ORBIT_CALL_OK);
+            CHECK(orbit_call_port_get_stats(ctx->port, &stats));
+            CHECK(stats.closed && stats.admitted == 0u);
+            CHECK(stats.callbacks_inflight == 0u && stats.occupied == 1u);
+            atomic_fetch_add(&test_owned_admit_close_hits, 1);
+        }
+        if (ctx != NULL &&
+            atomic_exchange(&test_owned_hook_stage_close, false)) {
+            orbit_call_port_stats stats = {0};
+            CHECK(orbit_call_port_get_stats(ctx->port, &stats));
+            CHECK(stats.executing == 1u && stats.occupied == 1u);
+            CHECK(stats.callbacks_inflight == 0u);
+            CHECK(orbit_call_u64_observe(
+                ctx->port, ctx->token) == ORBIT_CALL_BUSY);
+            CHECK(orbit_call_port_close(
+                ctx->port, ORBIT_CALL_TERMINAL_STOPPED) == ORBIT_CALL_OK);
+            CHECK(orbit_call_port_get_stats(ctx->port, &stats));
+            CHECK(stats.closed && stats.stopped == 1u);
+            CHECK(stats.callbacks_inflight == 0u && stats.occupied == 1u);
+            CHECK(stats.executing == 1u);
+            atomic_fetch_add(&test_owned_stage_close_hits, 1);
         }
     }
     if (size == 0u) return CMETA_OK;
@@ -219,6 +259,7 @@ typedef struct call_probe {
     atomic_bool fail_owned_reply_copy;
     atomic_bool reenter_owned_stage_copy;
     atomic_bool reenter_owned_restore;
+    atomic_bool reenter_owned_stage_close;
 } call_probe;
 
 typedef struct call_fixture {
@@ -433,6 +474,8 @@ static bool call_owned_observe(void *user, const cmeta_type_desc *type,
             CHECK(ctx != NULL);
             atomic_store(&ctx->hook_copy, true);
         }
+        if (atomic_load(&f->probe.reenter_owned_stage_close))
+            atomic_store(&test_owned_hook_stage_close, true);
         status = orbit_call_value_stage_reply(
             &f->calls, token, 10u, 0, &reply);
         if (fail) atomic_store(&test_owned_fail_copy, false);
@@ -494,6 +537,9 @@ static void call_owned_terminal(
     } else if (outcome == ORBIT_CALL_TERMINAL_NO_REPLY) {
         CHECK(response == NULL && stats.executing == 0u);
         atomic_fetch_add(&p->no_reply, 1);
+    } else if (outcome == ORBIT_CALL_TERMINAL_STOPPED) {
+        CHECK(response == NULL && stats.executing == 1u);
+        atomic_fetch_add(&p->stopped, 1);
     } else {
         CHECK(0 && "unexpected native VALUE terminal");
     }
@@ -557,6 +603,7 @@ static void fixture_prepare_ex(call_fixture *fixture, size_t mailbox_capacity,
     atomic_init(&fixture->probe.fail_owned_reply_copy, false);
     atomic_init(&fixture->probe.reenter_owned_stage_copy, false);
     atomic_init(&fixture->probe.reenter_owned_restore, false);
+    atomic_init(&fixture->probe.reenter_owned_stage_close, false);
     CHECK(cflow_machine_build(&fixture->machine, &definition) == CFLOW_MACHINE_OK);
     CHECK(cflow_executor_owner_init_with_capacity(
         &fixture->executor, 64u, NULL, NULL));
@@ -1787,6 +1834,107 @@ static void test_owned_provider_restore_reentry_credit(void) {
     fixture_destroy(&f);
 }
 
+
+/* The provider closes the original Port while a native request deep-copy
+ * is still in ADMITTING, before CFlow accepted its token. Reentrant close
+ * must not fabricate STOPPED, and the failed submission must return no
+ * token/callback after its own pending CMeta cleanup completes.
+ */
+static void test_owned_provider_close_during_admission(void) {
+    call_fixture f;
+    test_owned_reentry_context ctx = {0};
+    test_owned_bytes input = {0};
+    const unsigned char raw[] = {0u, 0xffu, 0x42u, 0x80u};
+    orbit_call_port_stats stats = {0};
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    uint64_t rejected = UINT64_MAX;
+
+    fixture_prepare_ex(&f, 2u, 1u, true);
+    ctx.port = &f.calls;
+    ctx.producer = &f.ref;
+    atomic_init(&ctx.hook_copy, false);
+    atomic_init(&ctx.hook_restore, false);
+    atomic_init(&ctx.copy_hits, 0);
+    atomic_init(&ctx.restore_hits, 0);
+    atomic_store(&test_owned_reentry_active, &ctx);
+    atomic_store(&test_owned_admit_close_hits, 0);
+    CHECK(test_owned_from(&input, raw, sizeof(raw), 32u));
+
+    /* Enable only after caller-owned test input is constructed. */
+    atomic_store(&test_owned_hook_admit_close, true);
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &input,
+        call_owned_terminal, &f.probe, &rejected, &send) ==
+          ORBIT_CALL_CLOSED);
+    CHECK(atomic_load(&test_owned_admit_close_hits) == 1);
+    CHECK(!atomic_load(&test_owned_hook_admit_close));
+    CHECK(rejected == 0u && send == CFLOW_ACTOR_SEND_INVALID_ARGUMENT);
+    CHECK(input.data != NULL); /* ownership never transferred */
+    CHECK(atomic_load(&f.probe.callback_count) == 0);
+    CHECK(atomic_load(&f.probe.business_executions) == 0);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.closed && stats.admitted == 0u);
+    CHECK(stats.occupied == 0u && stats.admitting == 0u);
+    CHECK(stats.callbacks_inflight == 0u && stats.executing == 0u);
+    CHECK(stats.stopped == 0u && stats.completed_success == 0u);
+
+    test_owned_destroy(&input);
+    atomic_store(&test_owned_reentry_active, NULL);
+    fixture_destroy(&f);
+}
+
+/* Close from a Provider response clone occurs after true CFlow post-commit
+ * Native business started and obtained the managed execution borrow.
+ * The one original terminal is STOPPED, stage_reply returns STALE and no
+ * delayed SUCCESS may appear from the still-running owner method.
+ */
+static void test_owned_provider_close_during_stage(void) {
+    call_fixture f;
+    test_owned_reentry_context ctx = {0};
+    test_owned_bytes input = {0};
+    const unsigned char raw[] = {0u, 0xffu, 0x42u, 0x80u};
+    orbit_call_port_stats stats = {0};
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    uint64_t stopped_token = 0u;
+
+    fixture_prepare_ex(&f, 2u, 1u, true);
+    ctx.port = &f.calls;
+    ctx.producer = &f.ref;
+    atomic_init(&ctx.hook_copy, false);
+    atomic_init(&ctx.hook_restore, false);
+    atomic_init(&ctx.copy_hits, 0);
+    atomic_init(&ctx.restore_hits, 0);
+    atomic_store(&test_owned_reentry_active, &ctx);
+    atomic_store(&f.probe.reenter_owned_stage_close, true);
+    atomic_store(&test_owned_stage_close_hits, 0);
+
+    CHECK(test_owned_from(&input, raw, sizeof(raw), 32u));
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &input,
+        call_owned_terminal, &f.probe, &stopped_token, &send) ==
+          ORBIT_CALL_OK);
+    CHECK(stopped_token != 0u && send == CFLOW_ACTOR_SEND_ACCEPTED);
+    ctx.token = stopped_token;
+    test_owned_destroy(&input);
+    fixture_drive_until(&f, &f.probe.observed, 1);
+    CHECK(atomic_load(&test_owned_stage_close_hits) == 1);
+    CHECK(!atomic_load(&test_owned_hook_stage_close));
+    CHECK(atomic_load(&f.probe.business_executions) == 1);
+    CHECK(atomic_load(&f.probe.callback_count) == 1);
+    CHECK(atomic_load(&f.probe.stopped) == 1);
+    CHECK(atomic_load(&f.probe.successes) == 0);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.closed && stats.admitted == 1u && stats.stopped == 1u);
+    CHECK(stats.completed_success == 0u && stats.completed_error == 0u);
+    CHECK(stats.occupied == 0u && stats.executing == 0u);
+    CHECK(stats.callbacks_inflight == 0u);
+    CHECK(orbit_call_u64_cancel(&f.calls, stopped_token) ==
+          ORBIT_CALL_STALE);
+
+    atomic_store(&test_owned_reentry_active, NULL);
+    fixture_destroy(&f);
+}
+
 int main(void) {
     test_mailbox_rejection_and_postcommit();
     test_cancel_credit_reuse();
@@ -1801,6 +1949,8 @@ int main(void) {
     test_owned_response_copy_fault_and_recovery();
     test_owned_provider_copy_reentry_cancel();
     test_owned_provider_restore_reentry_credit();
+    test_owned_provider_close_during_admission();
+    test_owned_provider_close_during_stage();
     test_concurrent_producers_and_terminals();
     test_concurrent_close_during_admission();
     return 0;
