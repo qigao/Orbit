@@ -1,8 +1,8 @@
 ## CMeta package identity follow-up
 
-This branch builds the exact CMeta source `77491f50e43b5737a2d10e020a96bc82f5a04576` from
-[Salts #1337](https://github.com/qigao/salts/pull/1337), stacked on #1336.
-The GitHub repository remains qigao/salts until its separate manual rename.
+This branch builds the exact CMeta source `070197059de8f1d670a9320fd718d04607f6e1f7` from
+[CMeta #1337](https://github.com/qigao/cmeta/pull/1337), stacked on #1336.
+The canonical GitHub repository is qigao/cmeta.
 Consumers require `find_package(CMeta CONFIG REQUIRED)` and link CMeta::
 targets, with no former Salts package aliases. Core-owned Salts:: targets and
 native/Provider/binding ABI contracts remain unchanged.
@@ -22,8 +22,8 @@ they do not qualify this package/toolchain change.
 # M0 — ACE / Provider targets and native ABI 2
 
 This stacked Draft continues Orbit #19 and consumes the breaking native API in
-[Salts #1332](https://github.com/qigao/salts/pull/1332), followed by the ACE/Provider
-CMake consolidation in [Salts #1336](https://github.com/qigao/salts/pull/1336). It is an application
+[Salts #1332](https://github.com/qigao/cmeta/pull/1332), followed by the ACE/Provider
+CMake consolidation in [Salts #1336](https://github.com/qigao/cmeta/pull/1336). It is an application
 migration and executable downstream qualification, not an SDK release.
 
 ## Runtime boundary

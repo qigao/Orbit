@@ -43,8 +43,8 @@ jobs:
       - name: Checkout immutable CMeta 4.0 CMeta ACE CFlow source owner
         uses: actions/checkout@v4
         with:
-          repository: qigao/salts
-          ref: 77491f50e43b5737a2d10e020a96bc82f5a04576
+          repository: qigao/cmeta
+          ref: 070197059de8f1d670a9320fd718d04607f6e1f7
           path: _deps/salts
           persist-credentials: false
 
@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
           test "$(git -C _deps/salts-core rev-parse HEAD)" = 287c30db125e1ada12d51bd17ba36cddd8302305
-          test "$(git -C _deps/salts rev-parse HEAD)" = 77491f50e43b5737a2d10e020a96bc82f5a04576
+          test "$(git -C _deps/salts rev-parse HEAD)" = 070197059de8f1d670a9320fd718d04607f6e1f7
           echo "ORBIT_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           git log -1 --format='%H %s'
 
@@ -202,8 +202,8 @@ jobs:
       - name: Checkout immutable CMeta 4.0
         uses: actions/checkout@v4
         with:
-          repository: qigao/salts
-          ref: 77491f50e43b5737a2d10e020a96bc82f5a04576
+          repository: qigao/cmeta
+          ref: 070197059de8f1d670a9320fd718d04607f6e1f7
           path: _deps/salts
           persist-credentials: false
 
@@ -213,7 +213,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
           test "$(git -C _deps/salts-core rev-parse HEAD)" = 287c30db125e1ada12d51bd17ba36cddd8302305
-          test "$(git -C _deps/salts rev-parse HEAD)" = 77491f50e43b5737a2d10e020a96bc82f5a04576
+          test "$(git -C _deps/salts rev-parse HEAD)" = 070197059de8f1d670a9320fd718d04607f6e1f7
 
       - name: Restore verified ccache tool and compiler outputs
         uses: qigao/stun/.github/actions/setup-ccache@4688683111b38dae5c2d814482b955dfc2e7d0a3
