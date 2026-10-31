@@ -314,6 +314,14 @@ static void test_mailbox_rejection_and_postcommit(void) {
     CHECK(token != 0u && send_status == CFLOW_ACTOR_SEND_ACCEPTED);
     CHECK(atomic_load(&f.probe.callback_count) == 0);
     {
+        orbit_method_id actual = 0u;
+        CHECK(orbit_call_u64_method(&f.calls, token, &actual) ==
+              ORBIT_CALL_OK);
+        CHECK(actual == 10u);
+        CHECK(orbit_call_u64_method(&f.calls, token, NULL) ==
+              ORBIT_CALL_INVALID_ARGUMENT);
+    }
+    {
         uint64_t probe_request = 0u;
         CHECK(orbit_call_u64_request(
             &f.calls, token, 20u, &probe_request) == ORBIT_CALL_TYPE_MISMATCH);
@@ -333,6 +341,12 @@ static void test_mailbox_rejection_and_postcommit(void) {
     fixture_drive_until(&f, &f.probe.successes, 1);
     CHECK(atomic_load(&f.probe.callback_count) == 1);
     CHECK(atomic_load(&f.probe.latest_response) == 42u);
+    {
+        orbit_method_id unchanged = UINT64_C(987);
+        CHECK(orbit_call_u64_method(&f.calls, token, &unchanged) ==
+              ORBIT_CALL_STALE);
+        CHECK(unchanged == UINT64_C(987));
+    }
     CHECK(atomic_load(&f.probe.action_executions) == 1);
     CHECK(atomic_load(&f.probe.business_executions) == 1);
     CHECK(orbit_call_u64_observe(&f.calls, token) == ORBIT_CALL_STALE);
