@@ -1,3 +1,22 @@
+## CMeta package identity follow-up
+
+This branch builds the exact CMeta source `98a175f8b6c4d88d30a4875294a1adaafa7e830e` from
+[Salts #1337](https://github.com/qigao/salts/pull/1337), stacked on #1336.
+The GitHub repository remains qigao/salts until its separate manual rename.
+Consumers require `find_package(CMeta 4.0 CONFIG REQUIRED)` and link CMeta::
+targets, with no former Salts package aliases. Core-owned Salts:: targets and
+native/Provider/binding ABI contracts remain unchanged.
+
+Both existing native jobs select the same compiler for installed Core, CMeta
+and Orbit: runner-native Clang on Linux, llvm-mingw/UCRT 20261020 on Windows.
+The shared compiler actions pin vcpkg-cache Draft #244 at
+`971d5d11325d01edef423e1d039afaec0409b2fe`; this dependency is not on master.
+No SDK publication or compiler/CRT cache relabeling is authorized by these
+source tests. The separate old salts-idlc executable remains a host process.
+
+Previous tables and CI evidence below describe earlier source revisions;
+they do not qualify this package/toolchain change.
+
 # M0 — ACE / Provider targets and native ABI 2
 
 This stacked Draft continues Orbit #19 and consumes the breaking native API in
@@ -11,8 +30,8 @@ Both the Orbit build and its installed package require `Salts 4.0`. Static
 Provider construction uses `salts_configurator_provider_binding`,
 `salts_configurator_dependency` and binding ABI version 2. Dynamic Providers
 include `<salts/service_host_provider_abi.h>` and link only
-`Salts::Provider`, which carries the CMeta/Plugin contracts without linking
-the ACE runtime. Orbit::ACE links `Salts::ACE`. The reflected
+`CMeta::Provider`, which carries the CMeta/Plugin contracts without linking
+the ACE runtime. Orbit::ACE links `CMeta::ACE`. The reflected
 `salts_service_host_provider` Interface publishes the current version-2
 contract and borrowed binding. No compatibility type, old header or fallback
 contract is supplied by Orbit.

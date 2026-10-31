@@ -7,7 +7,7 @@
 
 ## Implemented in this branch
 
-- `Orbit::Core` is a static C11 library. Its entire native execution depends on `Salts::CFlow`.
+- `Orbit::Core` is a static C11 library. Its entire native execution depends on `CMeta::CFlow`.
 - `orbit_service_spawn()` validates a sorted method-ID catalog against the already-built `cflow_machine` Event schema, allocates **one Core-owned immutable snapshot** of that catalog, then creates and starts **one genuine CFlow Machine Actor**. This snapshot outlives the originating input array.
 - `orbit_service_ref_acquire/retain/release` retain the existing `cflow_actor_ref` **and** an independently refcounted Core-owned catalog snapshot. A retained producer can safely return `STALE` after the Service root and original input table have gone away without dereferencing unloaded method-table storage.
 - `orbit_service_ref_try_send()` resolves a stable method ID through a bounded binary search and makes **one** `cflow_actor_ref_try_send` attempt. It allocates nothing and does not build a second mailbox/dispatcher. Payload admission is the CFlow trivial copy and rejection retains caller ownership.
@@ -16,7 +16,7 @@
 
 ## Exact compatibility boundary
 
-The upstream currently inspected is Salts 3 `master` with `Salts::CFlow`/CMeta/ServiceHost and a public `cflow_actor_ref_try_send` that accepts only CMeta trivially-copyable and trivially-destructible Event payloads. The new CMake requires `find_package(Salts 3.0 CONFIG REQUIRED)`. It must not silently compile with the previous Salts 2.2/2.3 epoch.
+The upstream currently inspected is Salts 3 `master` with `CMeta::CFlow`/CMeta/ServiceHost and a public `cflow_actor_ref_try_send` that accepts only CMeta trivially-copyable and trivially-destructible Event payloads. The new CMake requires `find_package(Salts 3.0 CONFIG REQUIRED)`. It must not silently compile with the previous Salts 2.2/2.3 epoch.
 
 No installed Salts 3 SDK is present in the current authoring environment; **the branch has not yet been linked or run against Salts 3**. No GREEN CI claim is made. The first real executable gate is configure/build/CTest with an immutable Salts 3 SDK and its transitive SaltsCore/Crypto dependencies. Missing SDK is an explicit blocker, not permission to add a fake proxy header, second runtime or compatibility switch.
 
