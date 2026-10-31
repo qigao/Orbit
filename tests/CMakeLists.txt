@@ -64,14 +64,23 @@ add_test(NAME orbit.public.cpp17 COMMAND orbit_public_cpp_test)
 # project or copied/handwritten generated output is allowed.
 option(ORBIT_IDL_CONFORMANCE "Compile and run genuine generated unary Service" OFF)
 if(ORBIT_IDL_CONFORMANCE)
-  if(WIN32)
-    message(FATAL_ERROR "M0d first host generator admission is Linux-only")
-  endif()
+  # Only an immutable host CLI is used. A separate Windows tool executable
+  # has the same canonical generator semantics and must not be linked to
+  # the Salts 3 native runtime.
+  set(_orbit_idlc "${ORBIT_IDL_SDK_ROOT}/utils/bin/salts-idlc${CMAKE_EXECUTABLE_SUFFIX}")
   if(NOT DEFINED ORBIT_IDL_SDK_ROOT OR
-     NOT EXISTS "${ORBIT_IDL_SDK_ROOT}/utils/bin/salts-idlc" OR
+     NOT EXISTS "${_orbit_idlc}" OR
      NOT EXISTS "${ORBIT_IDL_SDK_ROOT}/utils/include/data_bind_binding_plan.h")
     message(FATAL_ERROR
       "ORBIT_IDL_CONFORMANCE requires the exact installed salts-idlc + headers")
+  endif()
+  if(WIN32)
+    set(_orbit_idl_env
+      --modify "PATH=path_list_prepend:${ORBIT_IDL_SDK_ROOT}/salts/bin"
+      --modify "PATH=path_list_prepend:${ORBIT_IDL_SDK_ROOT}/utils/bin")
+  else()
+    set(_orbit_idl_env
+      --modify "LD_LIBRARY_PATH=path_list_prepend:${ORBIT_IDL_SDK_ROOT}/salts/lib")
   endif()
   set(_orbit_idl_dir "${CMAKE_CURRENT_BINARY_DIR}/generated-idl")
   set(_orbit_idl_records "${_orbit_idl_dir}/game_records.h")
@@ -80,14 +89,13 @@ if(ORBIT_IDL_CONFORMANCE)
   add_custom_command(
     OUTPUT "${_orbit_idl_records}" "${_orbit_idl_header}" "${_orbit_idl_source}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${_orbit_idl_dir}"
-    COMMAND "${CMAKE_COMMAND}" -E env
-      "LD_LIBRARY_PATH=${ORBIT_IDL_SDK_ROOT}/salts/lib"
-      "${ORBIT_IDL_SDK_ROOT}/utils/bin/salts-idlc"
+    COMMAND "${CMAKE_COMMAND}" -E env ${_orbit_idl_env}
+      "${_orbit_idlc}"
       "${CMAKE_CURRENT_SOURCE_DIR}/idl/game.schema" --lang c
       --output "${_orbit_idl_records}"
       --artifacts native --artifact-name game
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/idl/game.schema"
-            "${ORBIT_IDL_SDK_ROOT}/utils/bin/salts-idlc"
+            "${_orbit_idlc}"
     VERBATIM
     COMMENT "Generate Orbit unary Client/Dispatcher from canonical salts-idlc")
   add_executable(orbit_generated_idl_native_test

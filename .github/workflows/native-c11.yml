@@ -249,6 +249,37 @@ jobs:
           cmake --install _build/salts --config Release
           test -f "$RUNNER_TEMP/salts-3.0/lib/cmake/Salts/SaltsTargets.cmake"
 
+      - name: Restore exact Windows salts-idlc host SDK
+        uses: actions/download-artifact@v4
+        with:
+          name: salts-utils-qualified-sdk-windows-x64
+          repository: qigao/salts-utils
+          run-id: 41156016239
+          github-token: ${{ github.token }}
+          path: _deps/saltsutils-idl-host
+
+      - name: Verify Windows native generator provenance and host DLL closure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE '_deps/saltsutils-idl-host'
+          $meta = Get-Content -LiteralPath (Join-Path $root 'sdk-provenance.json') -Raw | ConvertFrom-Json
+          if ($meta.repository -ne 'qigao/salts-utils' -or
+              $meta.source_sha -ne 'd8de149f879d43c60d0a4978329abdcaa2508243' -or
+              $meta.run_id -ne '41156016239' -or
+              $meta.rid -ne 'windows-x64') {
+            throw "Unexpected salts-idlc Windows SDK provenance: $($meta | ConvertTo-Json -Compress)"
+          }
+          foreach ($rel in @('utils/bin/salts-idlc.exe',
+                             'utils/include/data_bind_binding_plan.h',
+                             'salts/bin/salts.dll')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $root $rel))) {
+              throw "Pinned compiler host artifact incomplete: $rel"
+            }
+          }
+          # Old Salts 2.3 DLL is loaded only inside external idlc.exe.
+          # Orbit target links and runs with installed canonical Salts 3.
+
       - name: Build and run real Windows x64 C11 and C++17 CTests
         shell: bash
         run: |
@@ -257,18 +288,22 @@ jobs:
           sdk="$RUNNER_TEMP/salts-3.0;$RUNNER_TEMP/saltscore-0.1"
           cmake -S . -B _build/orbit-ace -G 'Visual Studio 18 2026' -A x64 \
             "-DCMAKE_PREFIX_PATH=$sdk" \
-            -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=ON
+            -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=ON \
+            -DORBIT_IDL_CONFORMANCE=ON \
+            "-DORBIT_IDL_SDK_ROOT=$GITHUB_WORKSPACE/_deps/saltsutils-idl-host"
           cmake --build _build/orbit-ace --config Release --parallel 2
-          ctest --test-dir _build/orbit-ace -C Release -N |
-            grep -q '^Total Tests: 6$'
+          ctest --test-dir _build/orbit-ace -C Release --show-only=json-v1 |
+            python -c 'import json,sys; n=len(json.load(sys.stdin)["tests"]); assert n == 7,n'
           ctest --test-dir _build/orbit-ace -C Release \
             --no-tests=error --output-on-failure --timeout 120
           cmake -S . -B _build/orbit-core-only -G 'Visual Studio 18 2026' -A x64 \
             "-DCMAKE_PREFIX_PATH=$sdk" \
-            -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=OFF
+            -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=OFF \
+            -DORBIT_IDL_CONFORMANCE=ON \
+            "-DORBIT_IDL_SDK_ROOT=$GITHUB_WORKSPACE/_deps/saltsutils-idl-host"
           cmake --build _build/orbit-core-only --config Release --parallel 2
-          ctest --test-dir _build/orbit-core-only -C Release -N |
-            grep -q '^Total Tests: 3$'
+          ctest --test-dir _build/orbit-core-only -C Release --show-only=json-v1 |
+            python -c 'import json,sys; n=len(json.load(sys.stdin)["tests"]); assert n == 4,n'
           ctest --test-dir _build/orbit-core-only -C Release \
             --no-tests=error --output-on-failure --timeout 120
 
