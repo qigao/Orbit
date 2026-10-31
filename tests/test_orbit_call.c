@@ -1093,6 +1093,150 @@ static void test_concurrent_close_during_admission(void) {
     }
 }
 
+
+/* Explicit bounded managed VALUE admission reuses the existing Actor and
+ * CMeta's owned byte_buffer (including embedded NUL/non-UTF8 octets).
+ * The source can be changed and destroyed immediately after successful send.
+ */
+static void test_owned_value_deepcopy_and_capacity(void) {
+    call_fixture f;
+    stl_byte_buffer source = {0};
+    stl_byte_buffer oversize = {0};
+    const unsigned char raw[] = {0u, 0xFFu, 0x42u, 0x80u};
+    orbit_call_port_stats stats = {0};
+    uint64_t token = 0u, rejected = UINT64_MAX;
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+
+    fixture_prepare_ex(&f, 2u, 1u, true);
+    CHECK(stl_byte_buffer_from(&source, raw, sizeof(raw), 32u) == STL_OK);
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &source,
+        call_owned_terminal, &f.probe, &token, &send) == ORBIT_CALL_OK);
+    CHECK(token != 0u && send == CFLOW_ACTOR_SEND_ACCEPTED);
+    CHECK(orbit_call_u64_async(
+        &f.calls, &f.ref, 10u, 1u, call_terminal, &f.probe,
+        &rejected, &send) == ORBIT_CALL_TYPE_MISMATCH);
+
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &source,
+        call_owned_terminal, &f.probe,
+        &rejected, &send) == ORBIT_CALL_FULL);
+    CHECK(rejected == 0u);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.occupied == 1u && stats.rejected_full == 1u);
+    /* In-place mutation cannot change the Port-owned deep clone. */
+    stl_byte_buffer_data(&source)[1] = 0x11u;
+    stl_byte_buffer_destroy(&source);
+    fixture_drive_until(&f, &f.probe.successes, 1);
+    CHECK(atomic_load(&f.probe.business_executions) == 1);
+    CHECK(atomic_load(&f.probe.callback_count) == 1);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.occupied == 0u && stats.executing == 0u);
+    CHECK(stats.completed_success == 1u && stats.rejected_full == 1u);
+    CHECK(orbit_call_value_begin(&f.calls, token, 10u,
+                                 (const void **)&source.data) ==
+          ORBIT_CALL_STALE);
+
+    CHECK(stl_byte_buffer_resize(&oversize, 33u) == STL_OK);
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &oversize,
+        call_owned_terminal, &f.probe,
+        &rejected, &send) == ORBIT_CALL_VALUE_TOO_LARGE);
+    CHECK(rejected == 0u && atomic_load(&f.probe.callback_count) == 1);
+    stl_byte_buffer_destroy(&oversize);
+    fixture_destroy(&f);
+}
+
+typedef struct owned_cancel_context {
+    call_fixture *fixture;
+    uint64_t token;
+    atomic_int result;
+    atomic_int full_result;
+} owned_cancel_context;
+
+static void cancel_while_owned_request_borrowed(void *user) {
+    owned_cancel_context *ctx = (owned_cancel_context *)user;
+    call_fixture *f = ctx->fixture;
+    orbit_call_port_stats stats = {0};
+    stl_byte_buffer input = {0};
+    const unsigned char raw[] = {0u, 0xFFu, 0x42u, 0x80u};
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    uint64_t rejected = UINT64_MAX;
+    size_t attempts = 0u;
+    while (!atomic_load(&f->probe.owned_business_entered) &&
+           attempts++ < 10000u)
+        cmeta_sleep_ms(1u);
+    CHECK(atomic_load(&f->probe.owned_business_entered));
+    atomic_store(&ctx->result, (int)orbit_call_u64_cancel(
+        &f->calls, ctx->token));
+    CHECK(orbit_call_port_get_stats(&f->calls, &stats));
+    CHECK(stats.executing == 1u && stats.occupied == 1u);
+    CHECK(stats.callbacks_inflight == 0u && stats.cancelled == 1u);
+    CHECK(stl_byte_buffer_from(&input, raw, sizeof(raw), 32u) == STL_OK);
+    atomic_store(&ctx->full_result, (int)orbit_call_value_async(
+        &f->calls, &f->ref, 10u, &input, call_owned_terminal, &f->probe,
+        &rejected, &send));
+    CHECK(rejected == 0u);
+    stl_byte_buffer_destroy(&input);
+    atomic_store(&f->probe.release_owned_business, true);
+}
+
+/* The cancellation callback is already over, but the business method
+ * continues to read Port-owned bytes. The slot stays RETAINED / FULL and
+ * cannot be reused until the original owner releases its execution pin.
+ */
+static void test_owned_execution_cancel_keeps_request(void) {
+    call_fixture f;
+    owned_cancel_context ctx = {0};
+    cmeta_thread_t thread = NULL;
+    stl_byte_buffer input = {0};
+    const unsigned char raw[] = {0u, 0xFFu, 0x42u, 0x80u};
+    uint64_t token = 0u;
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    orbit_call_port_stats stats = {0};
+
+    fixture_prepare_ex(&f, 2u, 1u, true);
+    atomic_store(&f.probe.hold_owned_business, true);
+    CHECK(stl_byte_buffer_from(&input, raw, sizeof(raw), 32u) == STL_OK);
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &input,
+        call_owned_terminal, &f.probe, &token, &send) == ORBIT_CALL_OK);
+    CHECK(send == CFLOW_ACTOR_SEND_ACCEPTED);
+    stl_byte_buffer_destroy(&input);
+    ctx.fixture = &f;
+    ctx.token = token;
+    atomic_init(&ctx.result, ORBIT_CALL_BUSY);
+    atomic_init(&ctx.full_result, ORBIT_CALL_BUSY);
+    CHECK(cmeta_thread_create(
+        &thread, cancel_while_owned_request_borrowed, &ctx) == 0);
+    fixture_drive_until(&f, &f.probe.observed, 1);
+    CHECK(cmeta_thread_join(&thread) == 0);
+    CHECK(atomic_load(&ctx.result) == ORBIT_CALL_OK);
+    CHECK(atomic_load(&ctx.full_result) == ORBIT_CALL_FULL);
+    CHECK(atomic_load(&f.probe.cancelled) == 1);
+    CHECK(atomic_load(&f.probe.successes) == 0);
+    CHECK(atomic_load(&f.probe.business_executions) == 1);
+    CHECK(orbit_call_u64_cancel(&f.calls, token) == ORBIT_CALL_STALE);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.admitted == 1u && stats.cancelled == 1u);
+    CHECK(stats.occupied == 0u && stats.executing == 0u);
+    CHECK(stats.callbacks_inflight == 0u && stats.rejected_full == 1u);
+
+    /* Reuse is legal only AFTER the owned request execution borrow exits. */
+    atomic_store(&f.probe.hold_owned_business, false);
+    CHECK(stl_byte_buffer_from(&input, raw, sizeof(raw), 32u) == STL_OK);
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &input,
+        call_owned_terminal, &f.probe, &token, &send) == ORBIT_CALL_OK);
+    stl_byte_buffer_destroy(&input);
+    fixture_drive_until(&f, &f.probe.successes, 1);
+    CHECK(atomic_load(&f.probe.callback_count) == 2);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.admitted == 2u && stats.completed_success == 1u);
+    CHECK(stats.cancelled == 1u && stats.occupied == 0u);
+    fixture_destroy(&f);
+}
+
 int main(void) {
     test_mailbox_rejection_and_postcommit();
     test_cancel_credit_reuse();
@@ -1101,6 +1245,8 @@ int main(void) {
     test_terminal_callback_holds_credit();
     test_foreign_actor_and_catalog_rejected();
     test_two_method_owner_dispatch();
+    test_owned_value_deepcopy_and_capacity();
+    test_owned_execution_cancel_keeps_request();
     test_concurrent_producers_and_terminals();
     test_concurrent_close_during_admission();
     return 0;
