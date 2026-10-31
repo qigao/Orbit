@@ -1210,6 +1210,23 @@ static void test_owned_value_deepcopy_and_capacity(void) {
 
     fixture_prepare_ex(&f, 2u, 1u, true);
     CHECK(test_owned_from(&source, raw, sizeof(raw), 32u));
+
+    /* Force the sole canonical DataDesc copy callback to fail. Admission
+     * must not publish a CFlow Event, transfer caller ownership, emit a
+     * terminal, or leak an occupied response credit on this failure.
+     */
+    atomic_store(&test_owned_fail_copy, true);
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &source,
+        call_owned_terminal, &f.probe, &rejected, &send) ==
+          ORBIT_CALL_VALUE_COPY_FAILED);
+    atomic_store(&test_owned_fail_copy, false);
+    CHECK(rejected == 0u && source.data != NULL);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.admitted == 0u && stats.occupied == 0u);
+    CHECK(stats.callbacks_inflight == 0u &&
+          atomic_load(&f.probe.callback_count) == 0);
+
     CHECK(orbit_call_value_async(
         &f.calls, &f.ref, 10u, &source,
         call_owned_terminal, &f.probe, &token, &send) == ORBIT_CALL_OK);
@@ -1234,6 +1251,7 @@ static void test_owned_value_deepcopy_and_capacity(void) {
     CHECK(orbit_call_port_get_stats(&f.calls, &stats));
     CHECK(stats.occupied == 0u && stats.executing == 0u);
     CHECK(stats.completed_success == 1u && stats.rejected_full == 1u);
+    CHECK(stats.rejected >= 1u); /* forced CMeta copy fault */
     {
         const void *expired_request = NULL;
         CHECK(orbit_call_value_begin(&f.calls, token, 10u,
