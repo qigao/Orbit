@@ -104,7 +104,8 @@ static orbit_call_slot *orbit_call_lookup_locked(
     slot = &impl->slots[one_based - 1u];
     if (slot->generation != generation ||
         slot->state == ORBIT_SLOT_FREE ||
-        slot->state == ORBIT_SLOT_COMPLETING)
+        slot->state == ORBIT_SLOT_COMPLETING ||
+        slot->state == ORBIT_SLOT_RETAINED)
         return NULL;
     return slot;
 }
@@ -617,7 +618,7 @@ orbit_call_status orbit_call_port_try_destroy(orbit_call_port *port) {
      * solely to reject destruction during those known live obligations. */
     cmeta_mutex_lock(&impl->mutex);
     if (!impl->closed || impl->owner->actor.impl != NULL ||
-        impl->submitting != 0u ||
+        impl->submitting != 0u || impl->executing != 0u ||
         impl->closing_calls != 0u || impl->callbacks_inflight != 0u) {
         cmeta_mutex_unlock(&impl->mutex);
         return ORBIT_CALL_BUSY;
