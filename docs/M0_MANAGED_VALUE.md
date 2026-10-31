@@ -255,3 +255,34 @@ both independent restores are attempted, but unsafe partially freed
 storage is never published as reusable. This is not a general
 recoverable allocator failure, nested/nullable VALUE admission,
 exhaustive scheduler/TSan proof, Streaming or RPC/COMMIT-ACK gate.
+
+
+## M0k.2g Provider close reentry during admission and stage
+
+M0k.2f moved all owning CMeta Provider copy/restore hooks outside the
+original CallPort mutex while preserving its STAGING and RECLAIMING
+credits. Two additional reentrant close orders remain independently
+important and are now tested inside the existing native Core CTest.
+
+First, a Provider's *request copy* hook calls Port close while the
+request is ADMITTING and no CFlow Event has been accepted. The Port
+must keep one pending slot credit until the copy returns, then reclaim
+that value without transferring the caller's data, emitting a callback
+or inventing a STOPPED terminal. The original async call returns CLOSED
+and token zero with admitted=0 and occupied=0 at quiescence.
+
+Second, a Provider's *response copy* hook calls Port close during
+STAGING after the real post-commit Native business method acquired its
+execution borrow. The original STOPPED terminal is delivered exactly
+once, while executing=1 and occupied=1. The Provider returns to the
+original stage function, which sees STALE, and the Actor completes
+business without a late SUCCESS. The final original credit is released
+only after the execution pin retires; the prior token is STALE.
+
+Both checks use the exact original CallPort, Salts Platform thread and
+test-local CMeta BufferOps-v2 provider. No duplicate Actor, scheduler,
+parser, loader, CI workflow, CTest executable or consumer project is
+introduced. These controlled close hooks do not establish exhaustive
+concurrent scheduling, ThreadSanitizer correctness or recoverable
+Provider restore failures. Remote RPC/Streaming and business COMMIT/ACK
+remain separate product gates.
