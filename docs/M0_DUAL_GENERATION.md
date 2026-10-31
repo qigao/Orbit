@@ -70,15 +70,43 @@ which truly executes in the original DSO. The compiler **does not**
 emit a DSO implementation body, and this test is not proof of general
 per-provider method discovery or deployment.
 
-The staged, deterministic cancellation exercise and interleaved
-executor progress do **not** establish simultaneous cross-thread
-admission/stop/cancel/reply race safety. Managed VALUE, Streaming,
-HTTP/2 RPC, persistent Directory, arbitrary schemas and cross-process
-terminal semantics are out of scope.
+M0h independently qualifies bounded native producer/close/cancel
+competition in the existing Core CallPort. The following M0i/M0j gates
+also run in this same original generated DSO native CTest, using the
+installed Salts4/ServiceHost ABI-2 owner and its exact Native Context-v1
+SaltsUtils generator host. The historical experimental ComponentProvider
+candidate and manual DSO fallback are deleted, not used as test fallbacks.
 
-Exact-head Linux Debug+Release ACE=ON 7/7 and Core-only 4/4, plus
-Windows x64 Release ACE=ON 7/7 and Core-only 4/4, must PASS on the
-unchanged pinned Salts3/Core0.1 SDK and canonical Linux/Windows
-`salts-idlc` host artifacts. SaltsUtils old ComponentProvider DSO
-workflows remain independent RED under issue #727 until separately
-repaired.
+### M0i: old-N terminal callback still executing
+
+The first generated N Ping terminal callback is deliberately held open.
+A different native thread confirms the original CallPort still holds
+`callbacks_inflight=1` and `occupied=2`, verifies N's Scope release,
+N generation drain and actual Plugin DSO unload all return BUSY, and
+checks the Scope generation remains N=21 even after N+1 publication.
+Only after these checks may it release the callback. N and N+1 complete
+their original generated calls and separately unload after true quiescence.
+
+### M0j: cancelling a native method already running
+
+The canonical original N Ping native business method pauses *after*
+post-commit dispatch enters but *before* its borrowed original N DSO
+Provider method invocation. A separate native thread cancels its
+still-accepted call exactly once; attempts to release original Scope,
+drain N or unload the DSO must all return BUSY. The original business
+method subsequently invokes the genuine old N Provider and records its
+side effect, but stage_reply returns STALE and no second SUCCESS terminal
+may escape. Local cancellation is not transaction rollback. Old N totals
+are four admitted, two SUCCESS plus two CANCELLED, three actual Provider
+invocations and zero residual CallPort credits, with N+1 isolated.
+
+Owner object destruction remains serial and only after all test helper
+threads join. No forced concurrent owner teardown, second scheduler,
+fallback generator, new CI/test executable or feature-detect CMake.
+These tests do not establish managed VALUE *generated* ABI, Streaming,
+remote HTTP/2 RPC, durable COMMIT/ACK or exhaustive ThreadSanitizer proof.
+
+**New exact-HEAD CI gate:** Linux Debug/Release ACE=ON 7/7 each,
+Core-only 4/4; Windows x64 Release ACE=ON 7/7 and Core-only 4/4.
+No pass claim until these real CTests execute on the Salts4/ABI-2
+branch. All PRs stay Draft/unmerged.
