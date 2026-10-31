@@ -100,6 +100,7 @@ if(ORBIT_IDL_CONFORMANCE)
     COMMENT "Generate Orbit unary Client/Dispatcher from canonical salts-idlc")
   add_executable(orbit_generated_idl_native_test
     test_orbit_generated_idl.c test_orbit_generated_cpp17.cpp
+    test_orbit_multi_room.c
     "${_orbit_idl_header}" "${_orbit_idl_records}")
   target_compile_features(orbit_generated_idl_native_test PRIVATE
     c_std_11 cxx_std_17)
