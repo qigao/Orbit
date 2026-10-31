@@ -343,6 +343,13 @@ static void test_provider_actor_scope_pin(void) {
     CHECK(orbit_ace_scope_guard_try_release(&guard, &native) ==
           ORBIT_ACE_SCOPE_OK);
     CHECK(native == SALTS_SERVICE_HOST_OK);
+    CHECK(orbit_ace_scope_guard_generation_id(&guard) == 0u);
+    {
+        salts_configurator_service expired;
+        CHECK(orbit_ace_scope_guard_find_service(
+            &guard, orbit_test_value_interface(), &expired) ==
+            SALTS_SERVICE_HOST_INVALID_ARGUMENT);
+    }
     CHECK(salts_service_host_generation_drain(
         &host, &n.generation) == SALTS_SERVICE_HOST_OK);
     CHECK(n.provider.deactivated == 1u && n.provider.destroyed == 1u);
