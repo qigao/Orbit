@@ -79,3 +79,40 @@ unchanged pinned Salts3/Core0.1 SDK and canonical Linux/Windows
 `salts-idlc` host artifacts. SaltsUtils old ComponentProvider DSO
 workflows remain independent RED under issue #727 until separately
 repaired.
+
+## M0i: live terminal callback pin (separate strict race gate)
+
+The M0g/ M0h deterministic admission proofs cannot by themselves prove
+that an outstanding **generated callback** pins the original Plugin
+generation during concurrent release attempts.
+
+The **same existing** \`orbit.ace.dso_native\` test now blocks the first
+generated N Ping terminal callback *after* the actual N DSO method returns,
+while the original Salts CFlow observer is still delivering that terminal
+and holds its preallocated CallPort callback credit. An independent native
+thread (using the existing \`Salts::Platform\` threading API) verifies:
+
+- \`callbacks_inflight=1\`, \`occupied=2\` with N's Ping terminal blocked and
+  N's second Pong call accepted but not processed;
+- \`orbit_ace_scope_guard_try_release(N)\` returns BUSY;
+- \`salts_service_host_generation_drain(N)\` returns BUSY;
+- \`cmeta_plugin_registry_unload(N)\` returns BUSY;
+- the original Scope still reports generation 21, never N+1.
+
+Only after this witness may the worker release the terminal callback
+barrier. The normal generated N/N+1 dispatch test then resumes and still
+requires the original N to drain and truly unload **only after** Actor,
+CallPort and Scope obligations retire, while N+1 continues and later
+unloads independently.
+
+The worker does not mutate or destroy the Actor, CallPort, Scope, or Plugin
+while reading their state. All owner-side teardown remains serialized
+after the worker joins, consistent with the published Scope API.
+
+This qualifies a **specific live-callback vs release/drain/unload race**,
+not concurrent destruction of the same owner objects, all possible
+scheduler interleavings, full cross-thread CFlow business progress,
+managed values, Streaming, remote RPC or ThreadSanitizer. It adds no
+runtime callback queue, alternate Provider ABI/loader, test executable
+or CI workflow. Prior legacy Candidate and handwritten DSO paths stay
+deleted.
