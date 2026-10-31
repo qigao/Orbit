@@ -99,8 +99,10 @@ if(ORBIT_IDL_CONFORMANCE)
     VERBATIM
     COMMENT "Generate Orbit unary Client/Dispatcher from canonical salts-idlc")
   add_executable(orbit_generated_idl_native_test
-    test_orbit_generated_idl.c "${_orbit_idl_header}" "${_orbit_idl_records}")
-  target_compile_features(orbit_generated_idl_native_test PRIVATE c_std_11)
+    test_orbit_generated_idl.c test_orbit_generated_cpp17.cpp
+    "${_orbit_idl_header}" "${_orbit_idl_records}")
+  target_compile_features(orbit_generated_idl_native_test PRIVATE
+    c_std_11 cxx_std_17)
   # Host SDK serves only the external generator PROCESS. Never admit its
   # Salts2.3 headers into the Salts3 Orbit runtime compilation.
   target_include_directories(orbit_generated_idl_native_test PRIVATE

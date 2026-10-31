@@ -11,6 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The generated contract is also compiled and linked as actual C++17. */
+extern int orbit_generated_cpp17_smoke(void);
+
 #define CHECK(expression) do { \
     if (!(expression)) { \
         fprintf(stderr, "%s:%d: failed: %s\n", \
@@ -27,6 +30,7 @@
 int databind_4_Game_4_Room_4_Ping(
     const PingRequest *request, PingResponse *response) {
     if (!request || !response) return 11;
+    if (request->seq == UINT64_C(999)) return 17;
     response->ack = request->seq + UINT64_C(1);
     return 0;
 }
@@ -51,6 +55,8 @@ typedef struct idl_fixture {
     unsigned callbacks;
     unsigned observed;
     unsigned errors;
+    unsigned app_errors;
+    unsigned cancelled;
     uint64_t ping_reply;
     uint64_t pong_reply;
 } idl_fixture;
@@ -117,6 +123,28 @@ static void on_pong(
     ++fixture->callbacks;
 }
 
+static void on_ping_application_error(
+    void *user, uint64_t token, orbit_call_terminal terminal,
+    int app_status, const PingResponse *response) {
+    idl_fixture *fixture = (idl_fixture *)user;
+    CHECK(fixture != NULL && token != 0u);
+    CHECK(terminal == ORBIT_CALL_TERMINAL_APPLICATION_ERROR);
+    CHECK(app_status == 17);
+    CHECK(response == NULL); /* Generated wrapper must not invent success. */
+    ++fixture->app_errors;
+}
+
+static void on_ping_cancelled(
+    void *user, uint64_t token, orbit_call_terminal terminal,
+    int app_status, const PingResponse *response) {
+    idl_fixture *fixture = (idl_fixture *)user;
+    CHECK(fixture != NULL && token != 0u);
+    CHECK(terminal == ORBIT_CALL_TERMINAL_CANCELLED);
+    CHECK(app_status == 0);
+    CHECK(response == NULL);
+    ++fixture->cancelled;
+}
+
 static void test_generated_unary_dispatch(void) {
     idl_fixture f;
     const cflow_machine_state states[] = {
@@ -148,7 +176,11 @@ static void test_generated_unary_dispatch(void) {
     PingRequest ping = {UINT64_C(5)};
     PingRequest pong = {UINT64_C(7)};
     PingRequest rejected = {UINT64_C(9)};
+    PingRequest failure_request = {UINT64_C(999)};
+    PingRequest cancelled_request = {UINT64_C(8)};
     databind_4_Game_4_Room_4_Ping__orbit_context rejected_context = {0};
+    databind_4_Game_4_Room_4_Ping__orbit_context failure_context = {0};
+    databind_4_Game_4_Room_4_Ping__orbit_context cancelled_context = {0};
     cflow_actor_send_status send_status = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
     orbit_call_port_stats stats = {0};
     uint64_t first = 0u, second = 0u, third = UINT64_MAX;
@@ -216,6 +248,43 @@ static void test_generated_unary_dispatch(void) {
     CHECK(stats.rejected_full == 1u);
     CHECK(orbit_call_u64_observe(&f.calls, first) == ORBIT_CALL_STALE);
 
+    /* Native function returned an application error. The typed generated
+     * client must forward the exact error and a NULL response view.
+     */
+    third = 0u;
+    CHECK(databind_4_Game_4_Room_4_Ping__orbit_call_async(
+        &f.calls, &f.producer, &failure_request, &failure_context,
+        on_ping_application_error, &f, &third, &send_status) ==
+          ORBIT_CALL_OK);
+    CHECK(third != 0u && send_status == CFLOW_ACTOR_SEND_ACCEPTED);
+    rounds = 0u;
+    while (f.app_errors == 0u && rounds++ < 2048u)
+        (void)cflow_executor_run_one(&f.executor);
+    CHECK(f.app_errors == 1u);
+    CHECK(orbit_call_u64_observe(&f.calls, third) == ORBIT_CALL_STALE);
+
+    /* A cancelled generation token cannot execute the native business
+     * method or receive an invented successful typed response.
+     */
+    third = 0u;
+    CHECK(databind_4_Game_4_Room_4_Ping__orbit_call_async(
+        &f.calls, &f.producer, &cancelled_request, &cancelled_context,
+        on_ping_cancelled, &f, &third, &send_status) == ORBIT_CALL_OK);
+    CHECK(third != 0u && send_status == CFLOW_ACTOR_SEND_ACCEPTED);
+    CHECK(orbit_call_u64_cancel(&f.calls, third) == ORBIT_CALL_OK);
+    CHECK(f.cancelled == 1u);
+    CHECK(orbit_call_u64_cancel(&f.calls, third) == ORBIT_CALL_STALE);
+    rounds = 0u;
+    while (f.observed < 4u && rounds++ < 2048u)
+        (void)cflow_executor_run_one(&f.executor);
+    CHECK(f.observed == 4u && f.errors == 0u);
+    CHECK(f.callbacks == 2u && f.app_errors == 1u && f.cancelled == 1u);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.admitted == 4u);
+    CHECK(stats.completed_success == 2u);
+    CHECK(stats.completed_error == 1u);
+    CHECK(stats.cancelled == 1u && stats.occupied == 0u);
+
     CHECK(orbit_service_request_stop(&f.service) == CFLOW_ACTOR_OK);
     rounds = 0u;
     while (cflow_actor_current_state(&f.service.actor) !=
@@ -231,6 +300,7 @@ static void test_generated_unary_dispatch(void) {
 }
 
 int main(void) {
+    CHECK(orbit_generated_cpp17_smoke() == 0);
     test_generated_unary_dispatch();
     return 0;
 }
