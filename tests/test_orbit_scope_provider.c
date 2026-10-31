@@ -222,7 +222,8 @@ static void call_finished(
     a->response = response;
 }
 
-static void actor_prepare(actor_fixture *a, orbit_ace_scope_guard *guard) {
+static void actor_prepare(actor_fixture *a, orbit_ace_scope_guard *guard,
+                          bool bind_scope) {
     const cflow_machine_state states[] = {
         {1u, &cmeta_type_int, CFLOW_MACHINE_STATE_ACTIVE}
     };
@@ -269,10 +270,12 @@ static void actor_prepare(actor_fixture *a, orbit_ace_scope_guard *guard) {
     CHECK(orbit_call_port_init(&a->calls, &a->service, 2u) ==
           ORBIT_CALL_OK);
     CHECK(orbit_service_ref_acquire(&a->service, &a->producer));
-    CHECK(orbit_ace_scope_guard_bind(
-        guard, &a->service, &a->calls) == ORBIT_ACE_SCOPE_OK);
-    CHECK(orbit_ace_scope_guard_bind(
-        guard, &a->service, &a->calls) == ORBIT_ACE_SCOPE_ALREADY_BOUND);
+    if (bind_scope) {
+        CHECK(orbit_ace_scope_guard_bind(
+            guard, &a->service, &a->calls) == ORBIT_ACE_SCOPE_OK);
+        CHECK(orbit_ace_scope_guard_bind(
+            guard, &a->service, &a->calls) == ORBIT_ACE_SCOPE_ALREADY_BOUND);
+    }
 }
 
 static void actor_close(actor_fixture *a) {
@@ -314,7 +317,7 @@ static void test_provider_actor_scope_pin(void) {
 
     CHECK(orbit_ace_scope_guard_open(
         &guard, &host, UINT64_C(11), &native) == ORBIT_ACE_SCOPE_OK);
-    actor_prepare(&actor, &guard);
+    actor_prepare(&actor, &guard, true);
     CHECK(orbit_ace_scope_guard_try_release(&guard, &native) ==
           ORBIT_ACE_SCOPE_BUSY);
 
@@ -365,7 +368,103 @@ static void test_provider_actor_scope_pin(void) {
           SALTS_SERVICE_HOST_OK);
 }
 
+
+/*
+ * M0k.2h: Scope binding is an activation-only operation. Two original
+ * ServiceHost generations own two actual independent Actor/CallPort pairs.
+ * A foreign Port must be rejected, as must the correct Port once CLOSED or
+ * after even one CFlow admission (including when the call has completed).
+ * The intentionally unbound test Actors keep their original scopes alive
+ * manually until every Actor and Port is destroyed.
+ */
+static void test_scope_binding_requires_unused_live_port(void) {
+    static_generation_fixture n = {0};
+    static_generation_fixture next = {0};
+    salts_service_host_runtime host = SALTS_SERVICE_HOST_RUNTIME_INIT;
+    salts_service_host_generation *retired = NULL;
+    salts_service_host_status exact = SALTS_SERVICE_HOST_OK;
+    orbit_ace_scope_guard old_scope = {0}, next_scope = {0};
+    actor_fixture closed_actor, late_actor;
+    uint64_t token = 0u;
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    unsigned rounds = 0u;
+
+    generation_prepare(&n, UINT64_C(21), 7);
+    generation_prepare(&next, UINT64_C(22), 101);
+    CHECK(salts_service_host_runtime_init(&host) == SALTS_SERVICE_HOST_OK);
+    CHECK(salts_service_host_runtime_publish(
+        &host, &n.generation, &retired) == SALTS_SERVICE_HOST_OK);
+    CHECK(retired == NULL);
+    CHECK(orbit_ace_scope_guard_open(
+        &old_scope, &host, UINT64_C(21), &exact) == ORBIT_ACE_SCOPE_OK);
+    CHECK(salts_service_host_runtime_publish(
+        &host, &next.generation, &retired) == SALTS_SERVICE_HOST_OK);
+    CHECK(retired == &n.generation);
+    CHECK(orbit_ace_scope_guard_open(
+        &next_scope, &host, UINT64_C(22), &exact) == ORBIT_ACE_SCOPE_OK);
+
+    actor_prepare(&closed_actor, &old_scope, false);
+    actor_prepare(&late_actor, &next_scope, false);
+
+    /* Both ports are live, but neither belongs to the foreign Actor. */
+    CHECK(!orbit_call_port_is_bound_to(
+        &closed_actor.calls, &late_actor.service));
+    CHECK(!orbit_call_port_is_bound_to(
+        &late_actor.calls, &closed_actor.service));
+    CHECK(orbit_ace_scope_guard_bind(
+        &old_scope, &closed_actor.service, &late_actor.calls) ==
+          ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+    CHECK(orbit_ace_scope_guard_bind(
+        &next_scope, &late_actor.service, &closed_actor.calls) ==
+          ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+
+    /* No calls have been admitted; a CLOSED Port still cannot bind. */
+    CHECK(orbit_call_port_close(
+        &closed_actor.calls, ORBIT_CALL_TERMINAL_STOPPED) == ORBIT_CALL_OK);
+    CHECK(orbit_ace_scope_guard_bind(
+        &old_scope, &closed_actor.service, &closed_actor.calls) ==
+          ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+
+    /* An accepted call must not be retroactively attached to a Scope. */
+    CHECK(orbit_call_u64_async(
+        &late_actor.calls, &late_actor.producer, UINT64_C(10), UINT64_C(5),
+        call_finished, &late_actor, &token, &send) == ORBIT_CALL_OK);
+    CHECK(send == CFLOW_ACTOR_SEND_ACCEPTED && token != 0u);
+    CHECK(orbit_ace_scope_guard_bind(
+        &next_scope, &late_actor.service, &late_actor.calls) ==
+          ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+    while (late_actor.terminals == 0u && rounds++ < 2048u)
+        (void)cflow_executor_run_one(&late_actor.executor);
+    CHECK(late_actor.terminals == 1u && late_actor.observed == 1u);
+    CHECK(late_actor.response == UINT64_C(106));
+    CHECK(orbit_ace_scope_guard_bind(
+        &next_scope, &late_actor.service, &late_actor.calls) ==
+          ORBIT_ACE_SCOPE_INVALID_ARGUMENT);
+
+    /* Test-only incorrect activation; preserve each borrowed Scope manually
+     * until after the native Actor and CallPort have fully retired.
+     */
+    actor_close(&closed_actor);
+    actor_close(&late_actor);
+    CHECK(orbit_call_port_try_destroy(&closed_actor.calls) == ORBIT_CALL_OK);
+    CHECK(orbit_call_port_try_destroy(&late_actor.calls) == ORBIT_CALL_OK);
+    CHECK(orbit_ace_scope_guard_try_release(
+        &old_scope, &exact) == ORBIT_ACE_SCOPE_OK);
+    CHECK(orbit_ace_scope_guard_try_release(
+        &next_scope, &exact) == ORBIT_ACE_SCOPE_OK);
+    CHECK(salts_service_host_generation_drain(
+        &host, &n.generation) == SALTS_SERVICE_HOST_OK);
+    CHECK(salts_service_host_runtime_close(
+        &host, &retired) == SALTS_SERVICE_HOST_OK);
+    CHECK(retired == &next.generation);
+    CHECK(salts_service_host_generation_drain(
+        &host, &next.generation) == SALTS_SERVICE_HOST_OK);
+    CHECK(salts_service_host_runtime_destroy(&host) == SALTS_SERVICE_HOST_OK);
+    CHECK(n.provider.destroyed == 1u && next.provider.destroyed == 1u);
+}
+
 int main(void) {
     test_provider_actor_scope_pin();
+    test_scope_binding_requires_unused_live_port();
     return 0;
 }
