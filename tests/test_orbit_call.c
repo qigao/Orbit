@@ -380,6 +380,20 @@ static void call_owned_terminal(
         CHECK(memcmp(((const test_owned_bytes *)bytes)->data,
                      expected, sizeof(expected)) == 0);
         atomic_fetch_add(&p->successes, 1);
+        if (atomic_load(&p->block_terminal)) {
+            size_t spins = 0u;
+            /* The borrowed owning response and the one Port credit MUST
+             * remain live while another native thread closes the Port and
+             * attempts a second submission. No callback-side mutex is held.
+             */
+            atomic_store(&p->terminal_entered, true);
+            while (!atomic_load(&p->release_terminal) &&
+                   spins++ < 10000u)
+                cmeta_sleep_ms(1u);
+            CHECK(atomic_load(&p->release_terminal));
+            CHECK(bytes->size == sizeof(expected));
+            CHECK(memcmp(bytes->data, expected, sizeof(expected)) == 0);
+        }
     } else if (outcome == ORBIT_CALL_TERMINAL_CANCELLED) {
         CHECK(response == NULL);
         CHECK(stats.executing == 1u); /* request still borrowed! */
@@ -1378,6 +1392,117 @@ static void test_owned_execution_cancel_keeps_request(void) {
     fixture_destroy(&f);
 }
 
+
+/* M0k.2d: an owning managed SUCCESS response is *borrowed* by its callback.
+ * Callback credit and backing bytes stay live while a separate native thread
+ * attempts both another admission and close on the same capacity-one Port.
+ * Only the callback's return releases the final COMPLETING credit.
+ */
+typedef struct owned_callback_close_context {
+    call_fixture *fixture;
+    atomic_int full_result;
+    atomic_int closed_result;
+    atomic_int close_result;
+    atomic_int proved_credit;
+} owned_callback_close_context;
+
+static void close_during_owned_terminal(void *user) {
+    owned_callback_close_context *ctx =
+        (owned_callback_close_context *)user;
+    call_fixture *fixture = ctx->fixture;
+    call_probe *p = &fixture->probe;
+    orbit_call_port_stats stats = {0};
+    test_owned_bytes input = {0};
+    const unsigned char raw[] = {0u, 0xffu, 0x42u, 0x80u};
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    uint64_t rejected = UINT64_MAX;
+    size_t spins = 0u;
+
+    while (!atomic_load(&p->terminal_entered) && spins++ < 10000u)
+        cmeta_sleep_ms(1u);
+    CHECK(atomic_load(&p->terminal_entered));
+    CHECK(orbit_call_port_get_stats(&fixture->calls, &stats));
+    CHECK(!stats.closed && stats.occupied == 1u);
+    CHECK(stats.callbacks_inflight == 1u && stats.executing == 0u);
+    CHECK(stats.admitted == 1u && stats.completed_success == 1u);
+
+    CHECK(test_owned_from(&input, raw, sizeof(raw), 32u));
+    atomic_store(&ctx->full_result, (int)orbit_call_value_async(
+        &fixture->calls, &fixture->ref, 10u, &input,
+        call_owned_terminal, p, &rejected, &send));
+    CHECK(rejected == 0u);
+    CHECK(atomic_load(&ctx->full_result) == ORBIT_CALL_FULL);
+    CHECK(atomic_load(&p->callback_count) == 1);
+
+    atomic_store(&ctx->close_result, (int)orbit_call_port_close(
+        &fixture->calls, ORBIT_CALL_TERMINAL_STOPPED));
+    CHECK(atomic_load(&ctx->close_result) == ORBIT_CALL_OK);
+    rejected = UINT64_MAX;
+    atomic_store(&ctx->closed_result, (int)orbit_call_value_async(
+        &fixture->calls, &fixture->ref, 10u, &input,
+        call_owned_terminal, p, &rejected, &send));
+    CHECK(rejected == 0u);
+    CHECK(atomic_load(&ctx->closed_result) == ORBIT_CALL_CLOSED);
+    CHECK(orbit_call_port_get_stats(&fixture->calls, &stats));
+    CHECK(stats.closed && stats.callbacks_inflight == 1u);
+    CHECK(stats.occupied == 1u && stats.executing == 0u);
+    CHECK(stats.stopped == 0u && stats.completed_success == 1u);
+    CHECK(stats.rejected_full == 1u);
+    CHECK(orbit_call_port_try_destroy(&fixture->calls) == ORBIT_CALL_BUSY);
+    CHECK(atomic_load(&p->callback_count) == 1);
+
+    test_owned_destroy(&input);
+    atomic_store(&ctx->proved_credit, 1);
+    atomic_store(&p->release_terminal, true);
+}
+
+static void test_owned_callback_close_keeps_reply(void) {
+    call_fixture f;
+    owned_callback_close_context ctx = {0};
+    cmeta_thread_t native_closer = NULL;
+    test_owned_bytes input = {0};
+    const unsigned char raw[] = {0u, 0xffu, 0x42u, 0x80u};
+    orbit_call_port_stats stats = {0};
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    uint64_t token = 0u;
+
+    fixture_prepare_ex(&f, 2u, 1u, true);
+    atomic_store(&f.probe.block_terminal, true);
+    CHECK(test_owned_from(&input, raw, sizeof(raw), 32u));
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &input,
+        call_owned_terminal, &f.probe, &token, &send) == ORBIT_CALL_OK);
+    CHECK(token != 0u && send == CFLOW_ACTOR_SEND_ACCEPTED);
+    test_owned_destroy(&input); /* Port owns accepted deep copy */
+
+    ctx.fixture = &f;
+    atomic_init(&ctx.full_result, ORBIT_CALL_BUSY);
+    atomic_init(&ctx.closed_result, ORBIT_CALL_BUSY);
+    atomic_init(&ctx.close_result, ORBIT_CALL_BUSY);
+    atomic_init(&ctx.proved_credit, 0);
+    CHECK(cmeta_thread_create(
+        &native_closer, close_during_owned_terminal, &ctx) == 0);
+    /* A real CFlow post-commit observer holds the borrowed owning response,
+     * and cannot finish until the second thread has verified the credit.
+     */
+    fixture_drive_until(&f, &f.probe.observed, 1);
+    CHECK(cmeta_thread_join(&native_closer) == 0);
+    CHECK(atomic_load(&ctx.proved_credit) == 1);
+    CHECK(atomic_load(&ctx.full_result) == ORBIT_CALL_FULL);
+    CHECK(atomic_load(&ctx.closed_result) == ORBIT_CALL_CLOSED);
+    CHECK(atomic_load(&ctx.close_result) == ORBIT_CALL_OK);
+    CHECK(atomic_load(&f.probe.successes) == 1);
+    CHECK(atomic_load(&f.probe.callback_count) == 1);
+    CHECK(atomic_load(&f.probe.business_executions) == 1);
+    CHECK(orbit_call_u64_cancel(&f.calls, token) == ORBIT_CALL_STALE);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.closed && stats.admitted == 1u);
+    CHECK(stats.completed_success == 1u && stats.stopped == 0u);
+    CHECK(stats.callbacks_inflight == 0u && stats.executing == 0u);
+    CHECK(stats.occupied == 0u && stats.rejected_full == 1u);
+    fixture_destroy(&f);
+}
+
 int main(void) {
     test_mailbox_rejection_and_postcommit();
     test_cancel_credit_reuse();
@@ -1388,6 +1513,7 @@ int main(void) {
     test_two_method_owner_dispatch();
     test_owned_value_deepcopy_and_capacity();
     test_owned_execution_cancel_keeps_request();
+    test_owned_callback_close_keeps_reply();
     test_concurrent_producers_and_terminals();
     test_concurrent_close_during_admission();
     return 0;
