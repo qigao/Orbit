@@ -1,7 +1,7 @@
 #ifndef ORBIT_DSO_PROVIDER_CONTRACT_H
 #define ORBIT_DSO_PROVIDER_CONTRACT_H
 
-#include <salts/component_provider_abi.h>
+#include <salts/service_host_provider_abi.h>
 
 /* Shared strict FR FunctionAbi, not a legacy R0 reflection-only interface.
  * Native CMeta type descriptors are compared semantically across two DSOs.

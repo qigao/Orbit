@@ -1,3 +1,6 @@
+> Historical source/evidence record. The current native SDK requirement and
+> Provider ABI migration are documented in [M0 ABI 2](M0_ABI2_MIGRATION.md).
+
 # Orbit M0b — bounded unary CFlow call-port admission
 
 **Status: Draft source, not yet compiled against an installed Salts 3 SDK.**

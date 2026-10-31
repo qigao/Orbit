@@ -6,10 +6,7 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 # Explicit SDK epoch, no retired runtime or opportunistic source fallback.
-find_package(Salts 3.0 CONFIG REQUIRED)
-if(NOT TARGET Salts::CFlow)
-  message(FATAL_ERROR "Orbit::Core requires the installed Salts::CFlow target")
-endif()
+find_package(Salts 4.0 CONFIG REQUIRED)
 
 add_library(orbit_core STATIC
   core/src/service.c
@@ -29,9 +26,6 @@ target_link_libraries(orbit_core
 # A standalone Orbit::Core build must not require Salts::ServiceHost.
 option(ORBIT_BUILD_ACE "Build canonical Salts ServiceHost scope adapter" OFF)
 if(ORBIT_BUILD_ACE)
-  if(NOT TARGET Salts::ServiceHost)
-    message(FATAL_ERROR "Orbit::ACE requires canonical Salts::ServiceHost")
-  endif()
   add_library(orbit_ace STATIC ace/src/scope.c)
   add_library(Orbit::ACE ALIAS orbit_ace)
   set_target_properties(orbit_ace PROPERTIES EXPORT_NAME ACE)

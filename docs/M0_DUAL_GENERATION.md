@@ -1,3 +1,6 @@
+> Historical source/evidence record. The current native SDK requirement and
+> Provider ABI migration are documented in [M0 ABI 2](M0_ABI2_MIGRATION.md).
+
 # M0g — two live generated Room instances across Plugin generations
 
 **Status: Draft implementation; exact-head CI is required before any PASS

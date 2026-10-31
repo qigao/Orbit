@@ -1,3 +1,6 @@
+> Historical source/evidence record. The current native SDK requirement and
+> Provider ABI migration are documented in [M0 ABI 2](M0_ABI2_MIGRATION.md).
+
 # M0a — verified source boundary, open executable gates
 
 **This document describes a new source implementation, not a successful build, CI run, installed SDK or completed M0 service.**

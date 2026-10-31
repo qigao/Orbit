@@ -1,0 +1,68 @@
+# M0 — installed Configurator/ServiceHost ABI 2
+
+This stacked Draft continues Orbit #19 and consumes the breaking native API in
+[Salts #1332](https://github.com/qigao/salts/pull/1332). It is an application
+migration and executable downstream qualification, not an SDK release.
+
+## Runtime boundary
+
+Both the Orbit build and its installed package require `Salts 4.0`. Static
+Provider construction uses `salts_configurator_provider_binding`,
+`salts_configurator_dependency` and binding ABI version 2. Dynamic Providers
+include `<salts/service_host_provider_abi.h>` and link only
+`Salts::ServiceHostProviderABI` plus `Salts::PluginABI`. Their reflected
+`salts_service_host_provider` Interface publishes the current version-2
+contract and borrowed binding. No compatibility type, old header or fallback
+contract is supplied by Orbit.
+
+The ACE adapter calls `salts_service_host_abi_v2_0_required()` on Scope
+admission. An earlier host archive cannot silently satisfy this link. Core-only
+builds retain their original CFlow-only dependency graph.
+
+## Existing executable path
+
+The same native CTests exercise:
+
+- static dependency construction and ServiceHost generation ownership;
+- the genuine IDL-generated unary Client/Dispatcher and two independent Room
+  receivers using canonical Native Context v1;
+- two real Provider DSOs, N/N+1 publication, the original Scope holding N,
+  accepted Actor/CallPort work, cancellation and terminal settlement, BUSY
+  drain/unload, final Scope release and actual Plugin unload;
+- public C11 and C++17 declarations with the native ABI 2 link boundary.
+
+All construction, generation, Plugin and scheduler authority stays in the
+original Salts owners. The generated Dispatcher binds one receiver once and
+does not discover services or reconstruct an ABI for every message. The
+discarded hand-written DSO adapter remains absent.
+
+## Immutable qualification inputs
+
+| Input | Identity |
+| --- | --- |
+| Salts runtime | `0f0b44f578366d18ced27c6e48694a54938d0d95` — Salts 4.0 / ABI 2.0 |
+| Core runtime | `cfc1ed0d24364689b10ef7a85cff28d8776eb7db` — Core 0.1 |
+| Canonical host compiler | SaltsUtils `852b5cc741ef0debb1735b03e129bb30a136f038` |
+| Host artifact run | `41168655686`, Linux/Windows native SDKs |
+
+The host compiler runs as a separate process. Its historical Salts 2.3 host
+dependency does not enter the Orbit/Provider includes or linked runtime.
+Native Context v1 is independent of the Configurator/ServiceHost ABI epoch;
+its single parser, generator and generated business signatures are unchanged.
+
+One `orbit_idl_codegen` build target owns the existing compiler command and all
+three generated outputs. Both native test executables depend on that owner;
+they do not each attach the custom rule to their own project. The first Windows
+run exposed concurrent invocations racing the compiler's output backup. The
+single-owner dependency fixes the build graph without disabling parallel
+compilation or changing the compiler's publication behavior.
+
+Local Linux tests against the actual installed runtime SDK pass Debug ACE+IDL
+7/7, Release ACE+IDL 7/7, and Release Core-only+IDL 4/4. The real generated DSO
+and two-Room CTests execute in these graphs. The existing native workflow must
+provide independent exact-HEAD Linux/Windows evidence; local results are not a
+claim of Windows or six-RID release qualification.
+
+Remote RPC, Streaming, managed-value request/reply, cross-process delivery,
+durable Directory and broader cross-thread race acceptance remain separate.
+No merge, release tag, new consumer project or new CI workflow is introduced.

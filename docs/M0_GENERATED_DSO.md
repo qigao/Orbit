@@ -1,3 +1,6 @@
+> Historical source/evidence record. The current native SDK requirement and
+> Provider ABI migration are documented in [M0 ABI 2](M0_ABI2_MIGRATION.md).
+
 # M0f — generated Native Context Service across a real Plugin generation
 
 **Status: new stacked Draft source, not a release claim.**

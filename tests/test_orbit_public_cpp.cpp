@@ -2,6 +2,7 @@
 #include <orbit/call.h>
 #if defined(ORBIT_TEST_HAS_ACE)
 #include <orbit/scope.h>
+#include <salts/service_host_abi.h>
 #endif
 
 #include <cstdint>
@@ -18,6 +19,8 @@ static_assert(std::is_standard_layout<orbit_call_port>::value, "Call ABI");
 #if defined(ORBIT_TEST_HAS_ACE)
 static_assert(std::is_standard_layout<orbit_ace_scope_guard>::value,
               "ACE guard C++17 ABI");
+static_assert(SALTS_SERVICE_HOST_ABI_MAJOR == 2u,
+              "Orbit ACE requires native ServiceHost ABI 2");
 #endif
 
 int main() {
