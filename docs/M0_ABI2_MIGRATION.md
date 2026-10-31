@@ -1,8 +1,29 @@
+## CMeta package identity follow-up
+
+This branch builds the exact CMeta source `070197059de8f1d670a9320fd718d04607f6e1f7` from
+[CMeta #1337](https://github.com/qigao/cmeta/pull/1337), stacked on #1336.
+The canonical GitHub repository is qigao/cmeta.
+Consumers require `find_package(CMeta CONFIG REQUIRED)` and link CMeta::
+targets, with no former Salts package aliases. Core-owned Salts:: targets and
+native/Provider/binding ABI contracts remain unchanged.
+
+Both existing native jobs select the same compiler for installed Core, CMeta
+and Orbit: runner-native Clang on Linux, llvm-mingw/UCRT 20261020 on Windows.
+The shared compiler actions use vcpkg-cache@master after #244 merged.
+Core source is pinned to `287c30db125e1ada12d51bd17ba36cddd8302305` from Core #135,
+which qualifies explicit Platform DLL exports, real scheduler TLS and
+llvm-mingw TinyTest initialization in the existing native graph.
+No SDK publication or compiler/CRT cache relabeling is authorized by these
+source tests. The separate old salts-idlc executable remains a host process.
+
+Previous tables and CI evidence below describe earlier source revisions;
+they do not qualify this package/toolchain change.
+
 # M0 — ACE / Provider targets and native ABI 2
 
 This stacked Draft continues Orbit #19 and consumes the breaking native API in
-[Salts #1332](https://github.com/qigao/salts/pull/1332), followed by the ACE/Provider
-CMake consolidation in [Salts #1336](https://github.com/qigao/salts/pull/1336). It is an application
+[Salts #1332](https://github.com/qigao/cmeta/pull/1332), followed by the ACE/Provider
+CMake consolidation in [Salts #1336](https://github.com/qigao/cmeta/pull/1336). It is an application
 migration and executable downstream qualification, not an SDK release.
 
 ## Runtime boundary
@@ -11,8 +32,8 @@ Both the Orbit build and its installed package require `Salts 4.0`. Static
 Provider construction uses `salts_configurator_provider_binding`,
 `salts_configurator_dependency` and binding ABI version 2. Dynamic Providers
 include `<salts/service_host_provider_abi.h>` and link only
-`Salts::Provider`, which carries the CMeta/Plugin contracts without linking
-the ACE runtime. Orbit::ACE links `Salts::ACE`. The reflected
+`CMeta::Provider`, which carries the CMeta/Plugin contracts without linking
+the ACE runtime. Orbit::ACE links `CMeta::ACE`. The reflected
 `salts_service_host_provider` Interface publishes the current version-2
 contract and borrowed binding. No compatibility type, old header or fallback
 contract is supplied by Orbit.

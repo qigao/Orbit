@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   native-c11:
-    name: Real CFlow / ServiceHost SDK · Ubuntu 24.04
+    name: CMeta LLVM CFlow / ServiceHost SDK · Ubuntu x64
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
@@ -36,15 +36,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: qigao/salts-core
-          ref: cfc1ed0d24364689b10ef7a85cff28d8776eb7db
+          ref: 287c30db125e1ada12d51bd17ba36cddd8302305
           path: _deps/salts-core
           persist-credentials: false
 
-      - name: Checkout immutable Salts 4.0 CMeta ACE CFlow source owner
+      - name: Checkout immutable CMeta 4.0 CMeta ACE CFlow source owner
         uses: actions/checkout@v4
         with:
-          repository: qigao/salts
-          ref: 7d57b78ba8dffacd935f87d926b97a6eb8627377
+          repository: qigao/cmeta
+          ref: 070197059de8f1d670a9320fd718d04607f6e1f7
           path: _deps/salts
           persist-credentials: false
 
@@ -53,36 +53,39 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
-          test "$(git -C _deps/salts-core rev-parse HEAD)" = cfc1ed0d24364689b10ef7a85cff28d8776eb7db
-          test "$(git -C _deps/salts rev-parse HEAD)" = 7d57b78ba8dffacd935f87d926b97a6eb8627377
+          test "$(git -C _deps/salts-core rev-parse HEAD)" = 287c30db125e1ada12d51bd17ba36cddd8302305
+          test "$(git -C _deps/salts rev-parse HEAD)" = 070197059de8f1d670a9320fd718d04607f6e1f7
           echo "ORBIT_HEAD=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           git log -1 --format='%H %s'
 
       - name: Install checksum-verified ccache and restore compilation cache
         uses: qigao/stun/.github/actions/setup-ccache@4688683111b38dae5c2d814482b955dfc2e7d0a3
         with:
-          profile: orbit-m0-real-native-sdk
+          profile: orbit-cmeta-native-clang
           source_sha: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Select shared runner-native LLVM
+        uses: qigao/vcpkg-cache/.github/actions/setup-llvm-native@master
 
       - name: Build/install exact SaltsCore 0.1 native shared owners
         shell: bash
         run: |
           set -euo pipefail
           core="$RUNNER_TEMP/saltscore-0.1"
-          cmake -S _deps/salts-core -B _build/core -G Ninja \
+          cmake -S _deps/salts-core -B _build/core -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$QIGAO_COMPILER_TOOLCHAIN_FILE" \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=OFF \
             "-DCMAKE_INSTALL_PREFIX=$core"
           cmake --build _build/core --parallel 2
           cmake --install _build/core
 
-      - name: Build/install exact Salts 4.0 CMeta ACE CFlow owners
+      - name: Build/install exact CMeta 4.0 CMeta ACE CFlow owners
         shell: bash
         run: |
           set -euo pipefail
           core="$RUNNER_TEMP/saltscore-0.1"
           salts="$RUNNER_TEMP/salts-4.0"
-          cmake -S _deps/salts -B _build/salts -G Ninja \
+          cmake -S _deps/salts -B _build/salts -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$QIGAO_COMPILER_TOOLCHAIN_FILE" \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=OFF -DBUILD_TESTS=OFF \
             -DBUILD_SHARED_LIBS=OFF -DBUILD_BENCHMARKS=OFF \
@@ -123,7 +126,7 @@ jobs:
           test -f _deps/saltsutils-idl-host/utils/include/data_bind_binding_plan.h
           test -f _deps/saltsutils-idl-host/salts/lib/libsalts.so.2.3
           # Salts 2.3 is only the isolated compiler HOST dependency.
-          # The downstream compiled Orbit process links ONLY Salts 4.
+          # The downstream compiled Orbit process links ONLY CMeta 4.
 
       - name: Build and execute Orbit real native CTests — Debug and Release
         shell: bash
@@ -132,7 +135,7 @@ jobs:
           sdk="$RUNNER_TEMP/salts-4.0;$RUNNER_TEMP/saltscore-0.1"
           export LD_LIBRARY_PATH="$RUNNER_TEMP/saltscore-0.1/lib:${LD_LIBRARY_PATH:-}"
           for mode in Debug Release; do
-            cmake -S . -B "_build/orbit-$mode" -G Ninja \
+            cmake -S . -B "_build/orbit-$mode" -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$QIGAO_COMPILER_TOOLCHAIN_FILE" \
               "-DCMAKE_BUILD_TYPE=$mode" \
               "-DCMAKE_PREFIX_PATH=$sdk" \
               -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=ON \
@@ -149,7 +152,7 @@ jobs:
           set -euo pipefail
           sdk="$RUNNER_TEMP/salts-4.0;$RUNNER_TEMP/saltscore-0.1"
           export LD_LIBRARY_PATH="$RUNNER_TEMP/saltscore-0.1/lib:${LD_LIBRARY_PATH:-}"
-          cmake -S . -B _build/orbit-core-only -G Ninja \
+          cmake -S . -B _build/orbit-core-only -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$QIGAO_COMPILER_TOOLCHAIN_FILE" \
             -DCMAKE_BUILD_TYPE=Release \
             "-DCMAKE_PREFIX_PATH=$sdk" \
             -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=OFF \
@@ -178,7 +181,7 @@ jobs:
           retention-days: 7
 
   windows-x64:
-    name: Real CFlow / ServiceHost SDK · Windows x64
+    name: CMeta LLVM CFlow / ServiceHost SDK · Windows x64
     runs-on: windows-2025
     timeout-minutes: 55
     steps:
@@ -192,15 +195,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: qigao/salts-core
-          ref: cfc1ed0d24364689b10ef7a85cff28d8776eb7db
+          ref: 287c30db125e1ada12d51bd17ba36cddd8302305
           path: _deps/salts-core
           persist-credentials: false
 
-      - name: Checkout immutable Salts 4.0
+      - name: Checkout immutable CMeta 4.0
         uses: actions/checkout@v4
         with:
-          repository: qigao/salts
-          ref: 7d57b78ba8dffacd935f87d926b97a6eb8627377
+          repository: qigao/cmeta
+          ref: 070197059de8f1d670a9320fd718d04607f6e1f7
           path: _deps/salts
           persist-credentials: false
 
@@ -209,30 +212,36 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
-          test "$(git -C _deps/salts-core rev-parse HEAD)" = cfc1ed0d24364689b10ef7a85cff28d8776eb7db
-          test "$(git -C _deps/salts rev-parse HEAD)" = 7d57b78ba8dffacd935f87d926b97a6eb8627377
+          test "$(git -C _deps/salts-core rev-parse HEAD)" = 287c30db125e1ada12d51bd17ba36cddd8302305
+          test "$(git -C _deps/salts rev-parse HEAD)" = 070197059de8f1d670a9320fd718d04607f6e1f7
 
       - name: Restore verified ccache tool and compiler outputs
         uses: qigao/stun/.github/actions/setup-ccache@4688683111b38dae5c2d814482b955dfc2e7d0a3
         with:
-          profile: orbit-m0-windows-msvc-x64
+          profile: orbit-cmeta-llvm-mingw-x64
           source_sha: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Select shared llvm-mingw UCRT
+        uses: qigao/vcpkg-cache/.github/actions/setup-llvm-mingw@master
+        with:
+          target: x64
+          version: "20261020"
 
       - name: Build and install real Windows SaltsCore 0.1 shared owner
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S _deps/salts-core -B _build/core -G 'Visual Studio 18 2026' -A x64 \
+          cmake -S _deps/salts-core -B _build/core -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$QIGAO_COMPILER_TOOLCHAIN_FILE" -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=OFF \
             "-DCMAKE_INSTALL_PREFIX=$RUNNER_TEMP/saltscore-0.1"
           cmake --build _build/core --config Release --parallel 2
           cmake --install _build/core --config Release
 
-      - name: Build and install real Windows Salts 4.0 CMeta ACE CFlow owner
+      - name: Build and install real Windows CMeta 4.0 CMeta ACE CFlow owner
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S _deps/salts -B _build/salts -G 'Visual Studio 18 2026' -A x64 \
+          cmake -S _deps/salts -B _build/salts -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$QIGAO_COMPILER_TOOLCHAIN_FILE" -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=OFF -DBUILD_TESTS=OFF \
             -DBUILD_SHARED_LIBS=OFF \
             -DBUILD_BENCHMARKS=OFF -DBUILD_EXAMPLES=OFF \
@@ -270,7 +279,7 @@ jobs:
             }
           }
           # Old Salts 2.3 DLL is loaded only inside external idlc.exe.
-          # Orbit target links and runs with installed canonical Salts 4.
+          # Orbit target links and runs with installed canonical CMeta 4.
 
       - name: Build and run real Windows x64 C11 and C++17 CTests
         shell: bash
@@ -278,7 +287,7 @@ jobs:
           set -euo pipefail
           export PATH="$(cygpath -u "$RUNNER_TEMP/saltscore-0.1")/bin:$(cygpath -u "$RUNNER_TEMP/salts-4.0")/bin:$PATH"
           sdk="$RUNNER_TEMP/salts-4.0;$RUNNER_TEMP/saltscore-0.1"
-          cmake -S . -B _build/orbit-ace -G 'Visual Studio 18 2026' -A x64 \
+          cmake -S . -B _build/orbit-ace -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$QIGAO_COMPILER_TOOLCHAIN_FILE" -DCMAKE_BUILD_TYPE=Release \
             "-DCMAKE_PREFIX_PATH=$sdk" \
             -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=ON \
             -DORBIT_IDL_CONFORMANCE=ON \
@@ -286,7 +295,7 @@ jobs:
           cmake --build _build/orbit-ace --config Release --parallel 2
           ctest --test-dir _build/orbit-ace -C Release \
             --no-tests=error --output-on-failure --timeout 120
-          cmake -S . -B _build/orbit-core-only -G 'Visual Studio 18 2026' -A x64 \
+          cmake -S . -B _build/orbit-core-only -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$QIGAO_COMPILER_TOOLCHAIN_FILE" -DCMAKE_BUILD_TYPE=Release \
             "-DCMAKE_PREFIX_PATH=$sdk" \
             -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=OFF \
             -DORBIT_IDL_CONFORMANCE=ON \

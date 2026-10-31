@@ -62,12 +62,12 @@ Architecture details and API contracts are developed in Draft PRs and tracked in
 
 ## Upstreams
 
-[Salts](https://github.com/qigao/salts) · [SaltsUtils](https://github.com/qigao/salts-utils) · [SaltsCore](https://github.com/qigao/salts-core) · [CHttp](https://github.com/qigao/chttp) · [FlowMQ](https://github.com/qigao/flowmq) · [TurboRaft](https://github.com/qigao/turboraft) · [TurboDB](https://github.com/qigao/turbodb) · [Skynet](https://github.com/cloudwu/skynet)
+[CMeta](https://github.com/qigao/cmeta) · [SaltsUtils](https://github.com/qigao/salts-utils) · [SaltsCore](https://github.com/qigao/salts-core) · [CHttp](https://github.com/qigao/chttp) · [FlowMQ](https://github.com/qigao/flowmq) · [TurboRaft](https://github.com/qigao/turboraft) · [TurboDB](https://github.com/qigao/turbodb) · [Skynet](https://github.com/cloudwu/skynet)
 
 
 ## Native M0 and optional ServiceHost ownership
 
-`Orbit::Core` is a static C11 adapter over the installed `Salts::CFlow` SDK.
+`Orbit::Core` is a static C11 adapter over the installed `CMeta::CFlow` SDK.
 `-DORBIT_BUILD_ACE=ON` adds `Orbit::ACE`, which uses the original ServiceHost
 Scope for generation protection. The default is OFF, keeping Core independent
 of the ACE target.
@@ -87,3 +87,9 @@ CMake/CTest graph; no standalone consumer/probe project is introduced.
 All integration work remains Draft and unmerged. The earlier M0 documents are
 historical design/evidence; the current version boundary and actual qualification
 are tracked in [M0 ABI 2 migration](docs/M0_ABI2_MIGRATION.md).
+
+The CMeta package migration is stacked on the ACE/Provider target migration.
+It requires the exact source from [CMeta #1337](https://github.com/qigao/cmeta/pull/1337)
+and shared LLVM setup from vcpkg-cache@master (#244 merged). Its native CI rebuilds Core,
+CMeta and Orbit under the same toolchain; historical MSVC/GCC results do not
+qualify LLVM SDKs. See [the migration record](docs/M0_ABI2_MIGRATION.md).

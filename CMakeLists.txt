@@ -5,8 +5,9 @@ include(CTest)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-# Explicit SDK epoch, no retired runtime or opportunistic source fallback.
-find_package(Salts 4.0 CONFIG REQUIRED)
+# Require the canonical SDK package without a version constraint.
+find_package(CMeta CONFIG REQUIRED)
+
 
 add_library(orbit_core STATIC
   core/src/service.c
@@ -18,12 +19,12 @@ target_include_directories(orbit_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/core/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(orbit_core
-  PUBLIC Salts::CFlow
+  PUBLIC CMeta::CFlow
   PRIVATE Salts::Platform)
 
 # Build the optional ACE adapter ONLY when explicitly requested. This is
 # a feature selection, not a find/probe/fallback against another SDK epoch.
-# A standalone Orbit::Core build must not require Salts::ACE.
+# A standalone Orbit::Core build must not require CMeta::ACE.
 option(ORBIT_BUILD_ACE "Build canonical Salts ServiceHost scope adapter" OFF)
 if(ORBIT_BUILD_ACE)
   add_library(orbit_ace STATIC ace/src/scope.c)
@@ -33,7 +34,7 @@ if(ORBIT_BUILD_ACE)
   target_include_directories(orbit_ace PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ace/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-  target_link_libraries(orbit_ace PUBLIC Orbit::Core Salts::ACE)
+  target_link_libraries(orbit_ace PUBLIC Orbit::Core CMeta::ACE)
 endif()
 
 if(BUILD_TESTING)
