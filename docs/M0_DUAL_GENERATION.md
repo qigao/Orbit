@@ -116,3 +116,44 @@ managed values, Streaming, remote RPC or ThreadSanitizer. It adds no
 runtime callback queue, alternate Provider ABI/loader, test executable
 or CI workflow. Prior legacy Candidate and handwritten DSO paths stay
 deleted.
+
+## M0j: cancellation after native function entry
+
+The M0g test cancelled *before* CFlow dispatch; M0i blocked a terminal
+callback *after* the real DSO method returned. Neither proves the
+in-between case where a generated native business method has started
+but a local cancellation arrives before its borrowed DSO vtable call.
+
+M0j extends the **same** \`orbit.ace.dso_native\` CTest (no new executable
+or workflow) with an opt-in test barrier within the **existing canonical
+Native Context-v1 Ping business symbol**, immediately before its actual
+\`orbit_dso_value_get\` DSO call.
+
+- One N Ping(1) is accepted while N=21 and N+1=22 generated Rooms remain
+  alive; the CFlow owner enters the real generated Dispatcher and pauses
+  *inside* the original application-owned Ping native method.
+- A separate Salts Platform thread sees \`occupied=1\`, then cancels the
+  accepted token. It verifies **exactly one** CANCELLED callback, stale
+  repeat cancellation, old Scope release BUSY, generation drain BUSY and
+  real old Plugin unload BUSY. The callback gives no response.
+- Only after these checks is the business function allowed to call the
+  pinned **real N DSO** vtable. The native function completes and records
+  its side effect, but \`stage_reply\` must return STALE and **must never
+  publish a SUCCESS callback** on that already-settled call.
+- Resulting old-N totals: four admitted calls, two SUCCESS and two
+  CANCELLED local terminals, zero occupied credits; three real N provider
+  calls (the cancelled-before-dispatch call does not execute business,
+  the cancelled-after-entry call does). New N+1 provider remains
+  isolated, and existing true N unload/N+1 continuation is preserved.
+
+This is intentional: a local cancel is a **terminal decision**, not a
+transactional rollback or a guarantee that already-started application
+logic is never executed. Therefore the original ServiceHost Scope must
+continue to pin the DSO until Actor/CallPort and all native work drain.
+No new provider implementation, dynamic ABI, Registry, loader,
+alternative dispatcher, transport fallback or scheduler is introduced.
+
+The test does not establish all possible stop/close/cancel races while
+two threads are executing user business callbacks, arbitrary managed
+values, remote exactly-once or durable commit/ACK. Both fixtures keep
+explicit address-stable owner/Scope lifetimes until all workers join.

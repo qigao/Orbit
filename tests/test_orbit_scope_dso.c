@@ -76,6 +76,12 @@ static int actual_provider_value(orbit_ace_scope_guard *scope) {
 typedef struct dso_room_receiver {
     orbit_dso_value projected;
     unsigned invocations;
+    /* Test-only: suspend the canonical native function BEFORE the real
+     * DSO provider method is called. This never changes its ABI.
+     */
+    atomic_bool hold_before_provider;
+    atomic_bool business_entered;
+    atomic_bool release_business;
 } dso_room_receiver;
 
 int databind_4_Game_4_Room_4_Ping(
@@ -83,6 +89,17 @@ int databind_4_Game_4_Room_4_Ping(
     dso_room_receiver *room = (dso_room_receiver *)receiver;
     int value;
     if (!room || !request || !response) return 17;
+    if (atomic_load(&room->hold_before_provider)) {
+        size_t checks = 0u;
+        atomic_store(&room->business_entered, true);
+        while (!atomic_load(&room->release_business) &&
+               checks++ < 10000u)
+            cmeta_sleep_ms(1u);
+        CHECK(atomic_load(&room->release_business));
+    }
+    /* A racing local cancellation must never unload this old N vtable.
+     * Cancellation does not roll back already-started native work.
+     */
     value = orbit_dso_value_get(&room->projected);
     if (value < 0) return 18;
     ++room->invocations;
@@ -253,6 +270,9 @@ static void dso_actor_start(dso_actor *actor, orbit_ace_scope_guard *scope) {
     atomic_init(&actor->hold_terminal, false);
     atomic_init(&actor->terminal_entered, false);
     atomic_init(&actor->release_terminal, false);
+    atomic_init(&actor->receiver.hold_before_provider, false);
+    atomic_init(&actor->receiver.business_entered, false);
+    atomic_init(&actor->receiver.release_business, false);
     CHECK(cflow_machine_build(&actor->machine, &definition) == CFLOW_MACHINE_OK);
     CHECK(cflow_executor_owner_init_with_capacity(
         &actor->executor, 64u, NULL, NULL));
@@ -330,6 +350,7 @@ typedef struct dso_live_terminal_probe {
     salts_service_host_generation *generation;
     cmeta_plugin_registry *registry;
     cmeta_plugin_ref plugin;
+    uint64_t cancel_token;
     atomic_int proved_busy;
 } dso_live_terminal_probe;
 
@@ -356,6 +377,47 @@ static void dso_check_live_terminal_scope(void *user) {
           UINT64_C(21));
     atomic_store(&probe->proved_busy, 1);
     atomic_store(&probe->actor->release_terminal, true);
+}
+
+
+/*
+ * M0j: the canonical N Ping native function has entered, but has not yet
+ * invoked the borrowed N Provider vtable. An independent native thread
+ * CANCELS the still-active call before releasing the method. It verifies
+ * Scope/drain/real Plugin unload still refuse the early release.
+ *
+ * The owner resumes and invokes N's actual DSO method AFTER cancellation:
+ * business side effects may complete, but no second SUCCESS terminal may
+ * escape the already-cancelled generation token.
+ */
+static void dso_cancel_during_live_business(void *user) {
+    dso_live_terminal_probe *probe = (dso_live_terminal_probe *)user;
+    orbit_call_port_stats stats = {0};
+    salts_service_host_status exact = SALTS_SERVICE_HOST_OK;
+    size_t checks = 0u;
+
+    while (!atomic_load(&probe->actor->receiver.business_entered) &&
+           checks++ < 10000u)
+        cmeta_sleep_ms(1u);
+    CHECK(atomic_load(&probe->actor->receiver.business_entered));
+    CHECK(orbit_call_port_get_stats(&probe->actor->port, &stats));
+    CHECK(stats.occupied == 1u && stats.callbacks_inflight == 0u);
+    CHECK(!stats.closed && probe->cancel_token != 0u);
+
+    CHECK(orbit_call_u64_cancel(
+        &probe->actor->port, probe->cancel_token) == ORBIT_CALL_OK);
+    CHECK(orbit_call_u64_cancel(
+        &probe->actor->port, probe->cancel_token) == ORBIT_CALL_STALE);
+    CHECK(orbit_ace_scope_guard_try_release(probe->scope, &exact) ==
+          ORBIT_ACE_SCOPE_BUSY);
+    CHECK(salts_service_host_generation_drain(
+        probe->runtime, probe->generation) == SALTS_SERVICE_HOST_BUSY);
+    CHECK(cmeta_plugin_registry_unload(
+        probe->registry, probe->plugin) == CMETA_PLUGIN_BUSY);
+    CHECK(orbit_ace_scope_guard_generation_id(probe->scope) ==
+          UINT64_C(21));
+    atomic_store(&probe->proved_busy, 2);
+    atomic_store(&probe->actor->receiver.release_business, true);
 }
 
 int main(void) {
@@ -533,6 +595,52 @@ int main(void) {
         CHECK(successor_actor.receiver.invocations == 2u);
         CHECK(orbit_call_u64_cancel(&actor.port, cancel_token) ==
               ORBIT_CALL_STALE);
+    }
+
+    /*
+     * One more N Ping is now accepted. The CFlow owner executes the real
+     * generated Context-v1 dispatcher, pauses INSIDE the canonical native
+     * function, and the original native probe thread races cancellation
+     * against the pre-acquired real N DSO Provider.
+     */
+    {
+        PingRequest during_business = {UINT64_C(1)};
+        uint64_t during_token = 0u;
+        cmeta_thread_t business_thread = NULL;
+        orbit_call_port_stats stats = {0};
+        live_terminal_probe.cancel_token = 0u;
+        atomic_store(&live_terminal_probe.proved_busy, 0);
+        atomic_store(&actor.receiver.hold_before_provider, true);
+        CHECK(databind_4_Game_4_Room_4_Ping__orbit_call_async(
+            &actor.port, &actor.producer, &during_business,
+            &actor.cancel_context, dso_generated_cancel_done,
+            &actor, &during_token, &actor_send) == ORBIT_CALL_OK);
+        CHECK(actor_send == CFLOW_ACTOR_SEND_ACCEPTED);
+        CHECK(during_token != 0u);
+        live_terminal_probe.cancel_token = during_token;
+        CHECK(cmeta_thread_create(
+            &business_thread, dso_cancel_during_live_business,
+            &live_terminal_probe) == 0);
+        /* The worker cannot cancel until the owner entered the business
+         * symbol, so this is not the earlier pre-dispatch cancel case.
+         */
+        rounds = 0u;
+        while (actor.observed < 4u && rounds++ < 2048u)
+            (void)cflow_executor_run_one(&actor.executor);
+        CHECK(actor.observed == 4u);
+        CHECK(cmeta_thread_join(&business_thread) == 0);
+        CHECK(atomic_load(&live_terminal_probe.proved_busy) == 2);
+        atomic_store(&actor.receiver.hold_before_provider, false);
+        CHECK(actor.cancelled == 2u && actor.callbacks == 2u);
+        CHECK(actor.observed == 4u && actor.errors == 0u);
+        CHECK(actor.receiver.invocations == 3u);
+        CHECK(successor_actor.receiver.invocations == 2u);
+        CHECK(orbit_call_port_get_stats(&actor.port, &stats));
+        CHECK(stats.admitted == 4u && stats.cancelled == 2u);
+        CHECK(stats.completed_success == 2u);
+        CHECK(stats.occupied == 0u && stats.callbacks_inflight == 0u);
+        CHECK(orbit_call_u64_observe(
+            &actor.port, during_token) == ORBIT_CALL_STALE);
     }
     CHECK(orbit_ace_scope_guard_generation_id(&old_scope) == UINT64_C(21));
 
