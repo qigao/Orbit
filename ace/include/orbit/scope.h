@@ -70,8 +70,16 @@ salts_service_host_status orbit_ace_scope_guard_find_service(
  * during startup, before publishing the Service to other producers.
  *
  * This records the handles that MUST be destroyed before releasing the
- * generation. It does not prove their business callbacks came from this
- * provider: obtain the provider binding via the guard above before building.
+ * generation. A non-null CallPort must be live, belong to the exact Service,
+ * and have admitted NO calls yet (including calls already completed); a
+ * closed or previously used Port cannot be retroactively Scope-pinned.
+ * The startup owner must serialize bind with producer publication: these
+ * checks do not make concurrent bind/admission safe.
+ *
+ * The opaque receiver's Provider provenance cannot be deduced from void*.
+ * Obtain its typed Provider projection through guard_find_service on this
+ * exact guard before building the native receiver; NEVER combine a receiver
+ * from a different ServiceHost Scope with this Service/Port.
  */
 orbit_ace_scope_status orbit_ace_scope_guard_bind(
     orbit_ace_scope_guard *guard,
