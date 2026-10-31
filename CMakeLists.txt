@@ -6,7 +6,7 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 # Explicit SDK epoch, no retired runtime or opportunistic source fallback.
-find_package(CMeta 4.0 CONFIG REQUIRED)
+find_package(CMeta CONFIG REQUIRED)
 
 
 add_library(orbit_core STATIC

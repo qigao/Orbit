@@ -84,6 +84,7 @@ orbit_ace_scope_status orbit_ace_scope_guard_bind(
     const orbit_service *service,
     const orbit_call_port *call_port) {
     orbit_ace_scope_impl *impl = orbit_ace_live(guard);
+    orbit_call_port_stats stats = {0};
     if (impl == NULL || !impl->valid_generation ||
         !impl->scope.live || service == NULL ||
         service->actor.impl == NULL ||
@@ -92,6 +93,18 @@ orbit_ace_scope_status orbit_ace_scope_guard_bind(
         return ORBIT_ACE_SCOPE_INVALID_ARGUMENT;
     if (impl->bound)
         return ORBIT_ACE_SCOPE_ALREADY_BOUND;
+    /*
+     * A borrowed Provider Scope must be attached BEFORE the first call is
+     * published. Attaching it after admission (even after completion) or
+     * to a closed Port would leave an unpinned lifetime window. The startup
+     * owner MUST serialize this snapshot with producer publication.
+     */
+    if (call_port != NULL &&
+        (!orbit_call_port_get_stats(call_port, &stats) ||
+         stats.closed || stats.admitted != 0u ||
+         stats.occupied != 0u || stats.admitting != 0u ||
+         stats.callbacks_inflight != 0u || stats.executing != 0u))
+        return ORBIT_ACE_SCOPE_INVALID_ARGUMENT;
     impl->service = service;
     impl->call_port = call_port;
     impl->bound = true;
