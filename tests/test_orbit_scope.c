@@ -16,7 +16,7 @@
 /*
  * These are actual Salts ServiceHost runtime calls, never test doubles.
  * A complete positive generation/Provider DSO acceptance needs the published
- * Salts 3 SDK and its existing ServiceHost fixture in an integration build;
+ * Salts 4 SDK and its existing ServiceHost fixture in an integration build;
  * it is an independent open gate, not something this test fabricates.
  */
 static void check_invalid_admission(void) {

@@ -4,10 +4,12 @@
 
 Orbit is the **application-facing service composition layer** for the Salts ecosystem. Its goal is to make a native service as straightforward to create, send to, call and observe as a Skynet service—without duplicating the runtimes that already exist.
 
-> **Status:** M0a source exists on this Draft branch: a native `Salts::CFlow`
-> `spawn/try_send/stop` adapter and in-repo test. It is **not yet compiled,
-> linked or CI-qualified** against a real Salts 3 SDK. `call/reply`, generated
-> IDL stubs and cluster features are still pending.
+> **Status:** this Draft branch implements native CFlow Service/CallPort,
+> generated scalar unary clients/dispatchers, independent Room receivers and
+> real ServiceHost N/N+1 Provider DSO invocation/unload. The runtime now requires
+> **Salts 4.0 / Configurator binding v2 / ServiceHost ABI 2.0**. See
+> [the migration and acceptance scope](docs/M0_ABI2_MIGRATION.md). Remote RPC,
+> Streaming, managed values and the durable Directory remain unqualified.
 
 ## Architectural rule
 
@@ -63,31 +65,25 @@ Architecture details and API contracts are developed in Draft PRs and tracked in
 [Salts](https://github.com/qigao/salts) · [SaltsUtils](https://github.com/qigao/salts-utils) · [SaltsCore](https://github.com/qigao/salts-core) · [CHttp](https://github.com/qigao/chttp) · [FlowMQ](https://github.com/qigao/flowmq) · [TurboRaft](https://github.com/qigao/turboraft) · [TurboDB](https://github.com/qigao/turbodb) · [Skynet](https://github.com/cloudwu/skynet)
 
 
-## Local M0a source (Draft)
+## Native M0 and optional ServiceHost ownership
 
-The current first implementation slice lives under `core/` and uses
-`Orbit::Core`, a static target requiring the actual installed
-`Salts::CFlow` SDK. See [M0 source admission and missing gates](docs/M0_ADMISSION.md).
+`Orbit::Core` is a static C11 adapter over the installed `Salts::CFlow` SDK.
+`-DORBIT_BUILD_ACE=ON` adds `Orbit::ACE`, which uses the original ServiceHost
+Scope for generation protection. The default is OFF, keeping Core independent
+of the ACE target.
 
-The native test `orbit.core.native` uses the existing CFlow Machine Actor
-and owner Executor/Scheduler. No new runtime worker, mailbox, transport or
-CI probe has been added. The M0b stacked branch also contains an experimental,
-**u64/u64-only**, fixed-credit `Orbit::Call` terminal protocol. Neither
-implementation is compiled/CI-qualified against an installed Salts 3 SDK.
+`-DORBIT_IDL_CONFORMANCE=ON -DORBIT_IDL_SDK_ROOT=/path/to/host-sdk` compiles
+`Game.schema` with the real canonical `salts-idlc` and runs the generated unary
+and two-Room tests. ACE plus IDL also enables the genuine generated Dispatcher
+across two real Provider DSOs. Turning IDL conformance OFF excludes that DSO
+test; there is no hand-written alternate adapter.
 
-### Optional M0c ServiceHost generation protection (Draft)
+Use one installed Salts 4.0/Core 0.1 SDK for Orbit, every native Provider DSO
+and generated application code. The exact host compiler remains a separate
+process with its own dependencies; none of those host libraries or headers
+enters the Orbit link graph. Existing native CI builds the same original
+CMake/CTest graph; no standalone consumer/probe project is introduced.
 
-`-DORBIT_BUILD_ACE=ON` explicitly adds `Orbit::ACE`, linked to the original
-`Salts::ServiceHost` for address-stable Scope acquisition and N -> N+1
-generation lifetime fencing. The default is **OFF**: `Orbit::Core` stays
-a CFlow-only native runtime adapter. See
-[ServiceHost Scope admission](docs/M0_SCOPE_ADMISSION.md).
-
-All current feature PRs remain Draft:
-[#10 local CFlow Service](https://github.com/qigao/Orbit/pull/10),
-[#11 bounded CallPort](https://github.com/qigao/Orbit/pull/11),
-[#12 native ServiceHost Scope guard](https://github.com/qigao/Orbit/pull/12).
-No generated IDL Service client, general-purpose managed request/reply
-shape, H2 Streaming or Directory is admitted yet. Exact SDK build/CTest and
-real Provider/Plugin unload acceptance remain blocked by
-[Issue #13](https://github.com/qigao/Orbit/issues/13).
+All integration work remains Draft and unmerged. The earlier M0 documents are
+historical design/evidence; the current version boundary and actual qualification
+are tracked in [M0 ABI 2 migration](docs/M0_ABI2_MIGRATION.md).

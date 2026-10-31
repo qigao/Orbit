@@ -32,7 +32,7 @@ typedef struct dso_generation {
     salts_service_host_generation generation;
     salts_configurator_deployment deployments[1];
     salts_configurator_instance instances[1];
-    salts_component_dependency dependencies[1];
+    salts_configurator_dependency dependencies[1];
     size_t activation_order[1];
     salts_service_host_module modules[1];
 } dso_generation;

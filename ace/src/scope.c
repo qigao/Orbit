@@ -1,4 +1,5 @@
 #include <orbit/scope.h>
+#include <salts/service_host_abi.h>
 
 #include <stdlib.h>
 
@@ -30,6 +31,10 @@ orbit_ace_scope_status orbit_ace_scope_guard_open(
     if (guard == NULL || guard->impl != NULL || runtime == NULL ||
         expected_generation_id == 0u)
         return ORBIT_ACE_SCOPE_INVALID_ARGUMENT;
+
+    /* Require the canonical native ABI at link time, including cross builds.
+     * Scope admission must never silently link an earlier host archive. */
+    salts_service_host_abi_v2_0_required();
 
     impl = (orbit_ace_scope_impl *)calloc(1u, sizeof(*impl));
     if (impl == NULL)

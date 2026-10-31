@@ -68,7 +68,7 @@ static const cmeta_object_interface_provider provider_interfaces = {
 };
 static cmeta_status provider_create(
     void *user, const cmeta_data_desc *config_data, const void *config_value,
-    const salts_component_dependency *deps, size_t dep_count,
+    const salts_configurator_dependency *deps, size_t dep_count,
     cmeta_object_ref *out) {
     provider_state *p = (provider_state *)user;
     cmeta_status result;
@@ -106,9 +106,9 @@ typedef struct static_generation_fixture {
     salts_service_host_generation generation;
     salts_configurator_deployment deployments[1];
     salts_configurator_instance instances[1];
-    salts_component_dependency dependencies[1];
+    salts_configurator_dependency dependencies[1];
     size_t activation_order[1];
-    salts_component_provider_binding binding;
+    salts_configurator_provider_binding binding;
     provider_state provider;
 } static_generation_fixture;
 
@@ -118,9 +118,9 @@ static void generation_prepare(static_generation_fixture *g,
     salts_configurator_deployment deployment;
     memset(g, 0, sizeof(*g));
     provider_init(&g->provider, value);
-    g->binding = (salts_component_provider_binding){
-        sizeof(salts_component_provider_binding),
-        SALTS_COMPONENT_PROVIDER_BINDING_ABI_VERSION,
+    g->binding = (salts_configurator_provider_binding){
+        sizeof(salts_configurator_provider_binding),
+        SALTS_CONFIGURATOR_PROVIDER_BINDING_ABI_VERSION,
         cmeta_component_meta(OrbitTestValueProvider),
         &g->provider, &provider_interfaces,
         provider_create, provider_activate, provider_deactivate

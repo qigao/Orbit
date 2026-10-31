@@ -40,9 +40,9 @@ static const cmeta_object_interface_provider interfaces = {
     sizeof(cmeta_object_interface_provider), NULL, project
 };
 
-static cmeta_status SALTS_COMPONENT_CALL create_provider(
+static cmeta_status SALTS_CONFIGURATOR_CALL create_provider(
     void *context, const cmeta_data_desc *config_type,
-    const void *config_value, const salts_component_dependency *deps,
+    const void *config_value, const salts_configurator_dependency *deps,
     size_t deps_count, cmeta_object_ref *out) {
     (void)deps;
     if (context == NULL || out == NULL || config_type != NULL ||
@@ -52,28 +52,28 @@ static cmeta_status SALTS_COMPONENT_CALL create_provider(
         out, context, &cmeta_data_int, NULL);
 }
 
-static const salts_component_provider_binding binding = {
-    sizeof(salts_component_provider_binding),
-    SALTS_COMPONENT_PROVIDER_BINDING_ABI_VERSION,
+static const salts_configurator_provider_binding binding = {
+    sizeof(salts_configurator_provider_binding),
+    SALTS_CONFIGURATOR_PROVIDER_BINDING_ABI_VERSION,
     cmeta_component_meta(OrbitDsoValueComponent),
     &provider_value, &interfaces,
     create_provider, NULL, NULL
 };
 
-static const salts_component_provider_binding *get_binding(void *self) {
-    return (const salts_component_provider_binding *)self;
+static const salts_configurator_provider_binding *get_binding(void *self) {
+    return (const salts_configurator_provider_binding *)self;
 }
 CMETA_IMPLEMENTS(
-    salts_component_provider, orbit_dso_binding_impl, 0u,
+    salts_service_host_provider, orbit_dso_binding_impl, 0u,
     .get_binding = get_binding);
-static salts_component_provider service_provider = {
+static salts_service_host_provider service_provider = {
     (void *)&binding, &orbit_dso_binding_impl_vtable
 };
 
 #define ORBIT_DSO_EXPORTS(X) \
-    X(interface, (salts_component_provider, &service_provider), \
-      ORBIT_DSO_PROVIDER_EXPORT_ID, SALTS_COMPONENT_PROVIDER_CONTRACT_ID, \
-      SALTS_COMPONENT_PROVIDER_CONTRACT_VERSION, 0)
+    X(interface, (salts_service_host_provider, &service_provider), \
+      ORBIT_DSO_PROVIDER_EXPORT_ID, SALTS_SERVICE_HOST_PROVIDER_CONTRACT_ID, \
+      SALTS_SERVICE_HOST_PROVIDER_CONTRACT_VERSION, 0)
 
 /* Original Salts Plugin manifest/registry. No Orbit loader or second ABI. */
 CMETA_PLUGIN_DECLARE(

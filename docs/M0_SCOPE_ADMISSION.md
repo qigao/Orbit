@@ -1,3 +1,6 @@
+> Historical source/evidence record. The current native SDK requirement and
+> Provider ABI migration are documented in [M0 ABI 2](M0_ABI2_MIGRATION.md).
+
 # M0c — canonical Salts ServiceHost Scope integration
 
 **Status: stacked Draft source, NOT compiled or CI-qualified.**
