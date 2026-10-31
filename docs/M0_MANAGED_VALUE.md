@@ -368,3 +368,78 @@ One successful TSan run is a sampled dynamic race check of the actual
 instrumented source, not a formal proof of every scheduler interleaving.
 Unsupported nested/nullable/collection VALUE, remote HTTP/2 Streaming
 and durable business COMMIT/ACK remain separate admission gates.
+
+## M0k.2j Scope-minted Native activation (Draft; exact-head CI required)
+
+The M0k.2h original ServiceHost Scope/CallPort pre-admission guard is now
+extended with **one opt-in activation-time join**. It is implemented in
+`Orbit::ACE` and operates on the **existing** original Salts Scope and CMeta
+`cmeta_object_interface_project_borrowed`. The canonical
+`native_context(1)` C business method, original NativeSourceIR/FunctionAbi,
+generated `__orbit_bind` / `__orbit_dispatch`, CFlow Actor and bounded
+CallPort are unchanged.
+
+```text
+original ServiceHost Scope N -- find_service(expected Interface)
+                            -- CMeta Provider projects ObjectRef
+                            -- trusted application initializes receiver
+                            -- recheck original live Actor + unused CallPort
+                            -- bind original Scope and mint activation handle
+                            -- resolve receiver ONCE for __orbit_bind
+                            -- publish producers
+```
+
+The new `orbit_ace_scope_guard_activate_native()` accepts the exact live
+Actor, its **never-admitted** CallPort, an exact CMeta interface descriptor
+and a **trusted application receiver initializer**. The initializer receives
+the borrowed `cmeta_interface_projection` emitted by the original Scope,
+not an arbitrary application-supplied projection. It constructs the typed
+Provider field within the address-stable application-owned business
+receiver, and supplies that receiver pointer. CMeta validates the generic
+projection and the initializer must validate the typed Interface surface.
+The actor's generated method still receives that same `void *receiver`,
+not a second reflection ABI. No CMeta lookup occurs during post-commit
+business execution.
+
+The original Scope is marked **activating** while calling the external
+Provider/project/initializer functions. Reentrant Scope release or old raw
+Scope binding returns BUSY. The CallPort is rechecked after callbacks; if a
+callback closes it or admits a call, activation fails with **no published
+ticket or Scope binding**. Projection rejection or initializer failure
+also leaves the Scope unbound for the application owner to repair/retry,
+with no implicit receiver cleanup (application state is caller-owned).
+
+A successful activation yields one non-owning
+`orbit_ace_native_activation` identity that is resolved **once** through
+`orbit_ace_native_activation_receiver()` with the *same live original
+Scope, Service and CallPort*. Empty/foreign/expired activations and
+cross-Actor or cross-N/N+1 pairings reject and clear the requested output.
+The handle is not a Plugin lease and is discarded before original Scope
+release. Existing service/CallPort close, callbacks, CFlow drain, original
+ServiceHost generation drain and real Plugin unload remain the same
+authoritative lifetime path.
+
+**Exact supported meaning:** this prevents accidental mismatch of the
+*activation issued by a Scope* against another Scope/Actor/Port. The
+initializer is explicitly trusted application code; no native system can
+prove the contents of an arbitrary `void *receiver` supplied outside this
+API. The handle is an owner-scoped, borrowed runtime identity, **not an
+unforgeable security credential**; user code must not mutate/forge its
+storage or reuse it after Scope retirement. There is no permission for
+concurrent producer publication during activation.
+
+The existing `orbit.ace.provider_native` verifies two independent genuine
+static CMeta Providers, N/N+1 projections and cross-activation rejection.
+It also injects initializer rejection, Scope release/bind reentry and a
+callback that closes its own CallPort during activation. The original
+`orbit.ace.dso_native` now uses this path to bind BOTH actual generated
+scalar Game.Room and managed OwnedGame.Room receivers from original
+Plugin DSOs under N/N+1 and tests cross-generation activation rejection.
+The old original DSO unload, cancellation-after-entry and N+1 continuation
+must all still actually pass.
+
+Keep the single existing Clang/llvm-mingw native CI, together with source-
+instrumented Linux TSan and current immutable CMeta/Core/salts-idlc host
+provenance. No new test executable, workflow, CMake probe, installer,
+consumer, Provider loader, runtime queue or fallback. **Do not claim
+M0k.2j complete or merge until the new exact PR HEAD has passed.**
