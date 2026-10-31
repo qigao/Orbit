@@ -134,11 +134,11 @@ jobs:
             cmake -S . -B "_build/orbit-$mode" -G Ninja \
               "-DCMAKE_BUILD_TYPE=$mode" \
               "-DCMAKE_PREFIX_PATH=$sdk" \
-              -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=ON
-              -DORBIT_IDL_CONFORMANCE=ON
+              -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=ON \
+              -DORBIT_IDL_CONFORMANCE=ON \
               "-DORBIT_IDL_SDK_ROOT=$GITHUB_WORKSPACE/_deps/saltsutils-idl-host"
             cmake --build "_build/orbit-$mode" --parallel 2
-            ctest --test-dir "_build/orbit-$mode" -N | grep -q '^Total Tests: 7
+            ctest --test-dir "_build/orbit-$mode" --show-only=json-v1 | python3 -c 'import json,sys; n=len(json.load(sys.stdin)["tests"]); assert n == 7,n'
             ctest --test-dir "_build/orbit-$mode" \
               --no-tests=error --output-on-failure --timeout 120
           done
@@ -152,11 +152,11 @@ jobs:
           cmake -S . -B _build/orbit-core-only -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             "-DCMAKE_PREFIX_PATH=$sdk" \
-            -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=OFF
-            -DORBIT_IDL_CONFORMANCE=ON
+            -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=OFF \
+            -DORBIT_IDL_CONFORMANCE=ON \
             "-DORBIT_IDL_SDK_ROOT=$GITHUB_WORKSPACE/_deps/saltsutils-idl-host"
           cmake --build _build/orbit-core-only --parallel 2
-          ctest --test-dir _build/orbit-core-only -N | grep -q '^Total Tests: 4
+          ctest --test-dir _build/orbit-core-only --show-only=json-v1 | python3 -c 'import json,sys; n=len(json.load(sys.stdin)["tests"]); assert n == 4,n'
           ctest --test-dir _build/orbit-core-only \
             --no-tests=error --output-on-failure --timeout 120
 
