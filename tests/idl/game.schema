@@ -1,0 +1,9 @@
+schema Game [version(1)];
+
+message PingRequest { uint64 seq; }
+message PingResponse { uint64 ack; }
+
+service Room {
+    [orbit(10,100)] Ping: PingRequest -> PingResponse;
+    [orbit(20,101)] Pong: PingRequest -> PingResponse;
+}

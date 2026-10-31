@@ -57,3 +57,46 @@ if(ORBIT_BUILD_ACE)
   target_link_libraries(orbit_public_cpp_test PRIVATE Orbit::ACE)
 endif()
 add_test(NAME orbit.public.cpp17 COMMAND orbit_public_cpp_test)
+
+# M0d: real salts-idlc generated header, built by the existing CMake/CTest
+# graph against the actual Salts 3 / Orbit Core SDK. This is opt-in until
+# both upstream canonical SDK epochs can be admitted; no probe/consumer
+# project or copied/handwritten generated output is allowed.
+option(ORBIT_IDL_CONFORMANCE "Compile and run genuine generated unary Service" OFF)
+if(ORBIT_IDL_CONFORMANCE)
+  if(WIN32)
+    message(FATAL_ERROR "M0d first host generator admission is Linux-only")
+  endif()
+  if(NOT DEFINED ORBIT_IDL_SDK_ROOT OR
+     NOT EXISTS "${ORBIT_IDL_SDK_ROOT}/utils/bin/salts-idlc" OR
+     NOT EXISTS "${ORBIT_IDL_SDK_ROOT}/utils/include/data_bind_binding_plan.h")
+    message(FATAL_ERROR
+      "ORBIT_IDL_CONFORMANCE requires the exact installed salts-idlc + headers")
+  endif()
+  set(_orbit_idl_dir "${CMAKE_CURRENT_BINARY_DIR}/generated-idl")
+  set(_orbit_idl_records "${_orbit_idl_dir}/game_records.h")
+  set(_orbit_idl_header "${_orbit_idl_dir}/game.service_native.h")
+  set(_orbit_idl_source "${_orbit_idl_dir}/game.service_native.c")
+  add_custom_command(
+    OUTPUT "${_orbit_idl_records}" "${_orbit_idl_header}" "${_orbit_idl_source}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${_orbit_idl_dir}"
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "LD_LIBRARY_PATH=${ORBIT_IDL_SDK_ROOT}/salts/lib"
+      "${ORBIT_IDL_SDK_ROOT}/utils/bin/salts-idlc"
+      "${CMAKE_CURRENT_SOURCE_DIR}/idl/game.schema" --lang c
+      --output "${_orbit_idl_records}"
+      --artifacts native --artifact-name game
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/idl/game.schema"
+            "${ORBIT_IDL_SDK_ROOT}/utils/bin/salts-idlc"
+    VERBATIM
+    COMMENT "Generate Orbit unary Client/Dispatcher from canonical salts-idlc")
+  add_executable(orbit_generated_idl_native_test
+    test_orbit_generated_idl.c "${_orbit_idl_header}" "${_orbit_idl_records}")
+  target_compile_features(orbit_generated_idl_native_test PRIVATE c_std_11)
+  target_include_directories(orbit_generated_idl_native_test PRIVATE
+    "${_orbit_idl_dir}" "${ORBIT_IDL_SDK_ROOT}/utils/include")
+  target_link_libraries(orbit_generated_idl_native_test
+    PRIVATE Orbit::Core Salts::Platform)
+  add_test(NAME orbit.idl.generated_unary
+    COMMAND orbit_generated_idl_native_test)
+endif()
