@@ -20,7 +20,8 @@ typedef enum orbit_call_slot_state {
      * callbacks can accumulate without respect to configured capacity.
      */
     ORBIT_SLOT_COMPLETING,
-    ORBIT_SLOT_RETAINED /* terminal ended, native execution still borrows */
+    ORBIT_SLOT_RETAINED, /* terminal ended, native execution still borrows */
+    ORBIT_SLOT_RECLAIMING /* CMeta Provider cleanup without Port mutex */
 } orbit_call_slot_state;
 
 typedef struct orbit_call_slot {
@@ -28,8 +29,8 @@ typedef struct orbit_call_slot {
     orbit_call_slot_state state;
     bool cancel_requested;
     bool staged;
-    bool observed;
-    orbit_method_id method;
+    bool staging; /* response copy in flight outside Port mutex */
+    bool observed;    orbit_method_id method;
     uint64_t request;
     uint64_t response;
     int application_status;
@@ -62,6 +63,7 @@ typedef struct orbit_call_impl {
     size_t executing;           /* independent of local terminal callback */
     orbit_call_value_contract value_contract; /* one immutable managed method */
     bool value_enabled;
+    bool destroying; /* final provider temp_close may reenter */
     bool closed;
     orbit_call_terminal close_reason;
     uint64_t admitted;
@@ -105,7 +107,8 @@ static orbit_call_slot *orbit_call_lookup_locked(
     if (slot->generation != generation ||
         slot->state == ORBIT_SLOT_FREE ||
         slot->state == ORBIT_SLOT_COMPLETING ||
-        slot->state == ORBIT_SLOT_RETAINED)
+        slot->state == ORBIT_SLOT_RETAINED ||
+        slot->state == ORBIT_SLOT_RECLAIMING)
         return NULL;
     return slot;
 }
@@ -157,22 +160,28 @@ static void orbit_call_terminal_locked(
     }
 }
 
-/* Caller holds the Port mutex. No concurrent callback/execution may
- * observe a slot while the canonical CMeta owned VALUE is being restored.
- * The original provider descriptors must still be leased by ServiceHost.
+/* External CMeta VALUE Providers may reenter the same Port. The caller
+ * marks this credit RECLAIMING under the mutex and unlocks BEFORE running
+ * either owning restore. Until both finish, the token is STALE and no
+ * producer can reuse the slot or destroy the Port.
  */
-static void orbit_call_release_slot_locked(orbit_call_slot *slot) {
+static void orbit_call_reclaim_slot(orbit_call_impl *impl,
+                                    orbit_call_slot *slot) {
+    cmeta_status req = CMETA_OK, resp = CMETA_OK;
     if (slot->managed) {
-        if (cmeta_data_value_restore_zero(
-                slot->owned_request.data, slot->owned_request.storage) !=
-                CMETA_OK ||
-            cmeta_data_value_restore_zero(
-                slot->owned_response.data, slot->owned_response.storage) !=
-                CMETA_OK)
-            abort(); /* Violated provider lifecycle, not a retryable error. */
+        req = cmeta_data_value_restore_zero(
+            slot->owned_request.data, slot->owned_request.storage);
+        resp = cmeta_data_value_restore_zero(
+            slot->owned_response.data, slot->owned_response.storage);
     }
+    /* Attempt BOTH restores; failed lifecycle cleanup is fail-stop, never
+     * permission to recycle a partially freed owned VALUE.
+     */
+    if (req != CMETA_OK || resp != CMETA_OK) abort();
+    cmeta_mutex_lock(&impl->mutex);
+    if (slot->state != ORBIT_SLOT_RECLAIMING ||
+        slot->executing != 0u || slot->staging) abort();
     slot->managed = false;
-    slot->executing = 0u;
     slot->method = 0u;
     slot->request = 0u;
     slot->response = 0u;
@@ -184,6 +193,7 @@ static void orbit_call_release_slot_locked(orbit_call_slot *slot) {
     slot->value_callback = NULL;
     slot->callback_user = NULL;
     slot->state = ORBIT_SLOT_FREE;
+    cmeta_mutex_unlock(&impl->mutex);
 }
 
 /*
@@ -218,11 +228,10 @@ static void orbit_call_deliver(orbit_call_impl *impl,
         slot->generation != generation || impl->callbacks_inflight == 0u)
         abort();
     --impl->callbacks_inflight;
-    if (slot->executing != 0u)
-        slot->state = ORBIT_SLOT_RETAINED;
-    else
-        orbit_call_release_slot_locked(slot);
+    const bool reclaim = slot->executing == 0u;
+    slot->state = reclaim ? ORBIT_SLOT_RECLAIMING : ORBIT_SLOT_RETAINED;
     cmeta_mutex_unlock(&impl->mutex);
+    if (reclaim) orbit_call_reclaim_slot(impl, slot);
 }
 
 static bool orbit_call_method_is_token(
@@ -345,6 +354,7 @@ orbit_call_status orbit_call_u64_async(
     slot->state = ORBIT_SLOT_ADMITTING;
     slot->cancel_requested = false;
     slot->staged = false;
+    slot->staging = false;
     slot->observed = false;
     slot->method = method;
     slot->request = request;
@@ -494,6 +504,10 @@ orbit_call_status orbit_call_u64_observe(
         cmeta_mutex_unlock(&impl->mutex);
         return ORBIT_CALL_STALE;
     }
+    if (slot->staging) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_BUSY;
+    }
     if (slot->observed) {
         cmeta_mutex_unlock(&impl->mutex);
         return ORBIT_CALL_DUPLICATE;
@@ -622,7 +636,8 @@ orbit_call_status orbit_call_port_try_destroy(orbit_call_port *port) {
      * before this owner-side call; close callbacks/submissions are tracked
      * solely to reject destruction during those known live obligations. */
     cmeta_mutex_lock(&impl->mutex);
-    if (!impl->closed || impl->owner->actor.impl != NULL ||
+    if (impl->destroying || !impl->closed ||
+        impl->owner->actor.impl != NULL ||
         impl->submitting != 0u || impl->executing != 0u ||
         impl->closing_calls != 0u || impl->callbacks_inflight != 0u) {
         cmeta_mutex_unlock(&impl->mutex);
@@ -634,6 +649,8 @@ orbit_call_status orbit_call_port_try_destroy(orbit_call_port *port) {
             return ORBIT_CALL_BUSY;
         }
     }
+    /* Even final cmeta_data_temp_close may invoke the external provider. */
+    impl->destroying = true;
     cmeta_mutex_unlock(&impl->mutex);
     /*
      * Owner Actor is already destroyed and no submissions/callbacks remain.
@@ -877,6 +894,7 @@ orbit_call_status orbit_call_value_async(
     slot->executing = 0u;
     slot->cancel_requested = false;
     slot->staged = false;
+    slot->staging = false;
     slot->observed = false;
     slot->method = method;
     slot->callback = NULL;
@@ -895,8 +913,9 @@ orbit_call_status orbit_call_value_async(
         cmeta_mutex_lock(&impl->mutex);
         --impl->submitting;
         ++impl->rejected;
-        orbit_call_release_slot_locked(slot);
+        slot->state = ORBIT_SLOT_RECLAIMING;
         cmeta_mutex_unlock(&impl->mutex);
+        orbit_call_reclaim_slot(impl, slot);
         return ORBIT_CALL_VALUE_COPY_FAILED; /* zero token, no callback */
     }
 
@@ -904,8 +923,9 @@ orbit_call_status orbit_call_value_async(
     cmeta_mutex_lock(&impl->mutex);
     if (impl->closed) {
         --impl->submitting;
-        orbit_call_release_slot_locked(slot);
+        slot->state = ORBIT_SLOT_RECLAIMING;
         cmeta_mutex_unlock(&impl->mutex);
+        orbit_call_reclaim_slot(impl, slot);
         return ORBIT_CALL_CLOSED;
     }
     cmeta_mutex_unlock(&impl->mutex);
@@ -921,7 +941,7 @@ orbit_call_status orbit_call_value_async(
     --impl->submitting;
     if (!accepted) {
         ++impl->rejected;
-        orbit_call_release_slot_locked(slot);
+        slot->state = ORBIT_SLOT_RECLAIMING;
     } else {
         ++impl->admitted;
         slot->state = ORBIT_SLOT_ACTIVE;
@@ -940,7 +960,10 @@ orbit_call_status orbit_call_value_async(
     }
     cmeta_mutex_unlock(&impl->mutex);
     *out_send = send_status;
-    if (!accepted) return ORBIT_CALL_REJECTED;
+    if (!accepted) {
+        orbit_call_reclaim_slot(impl, slot);
+        return ORBIT_CALL_REJECTED;
+    }
     *out_token = token;
     orbit_call_deliver(impl, &delivery);
     return ORBIT_CALL_OK;
@@ -983,7 +1006,7 @@ orbit_call_status orbit_call_value_stage_reply(
     orbit_call_impl *impl = orbit_call_live(port);
     orbit_call_slot *slot;
     orbit_call_status bounded = ORBIT_CALL_OK;
-    cmeta_status copy_status = CMETA_OK;
+    const uint32_t generation = (uint32_t)(token >> 32);
     if (impl == NULL || !impl->value_enabled ||
         token == 0u || expected_method == 0u)
         return ORBIT_CALL_INVALID_ARGUMENT;
@@ -998,29 +1021,52 @@ orbit_call_status orbit_call_value_stage_reply(
         cmeta_mutex_unlock(&impl->mutex);
         return ORBIT_CALL_TYPE_MISMATCH;
     }
-    if (slot->staged || slot->observed || slot->executing != 1u) {
+    if (slot->staged || slot->staging || slot->observed ||
+        slot->executing != 1u) {
         cmeta_mutex_unlock(&impl->mutex);
         return ORBIT_CALL_DUPLICATE;
     }
-    if (application_status == 0) {
-        if (response == NULL) {
-            cmeta_mutex_unlock(&impl->mutex);
-            return ORBIT_CALL_INVALID_ARGUMENT;
-        }
-        bounded = orbit_value_check_size(
-            impl->value_contract.response, response,
-            impl->value_contract.max_response_bytes);
-        if (bounded == ORBIT_CALL_OK) {
-            copy_status = cmeta_data_value_copy(
-                impl->value_contract.response,
-                slot->owned_response.storage, response);
-            if (copy_status != CMETA_OK)
-                bounded = ORBIT_CALL_VALUE_COPY_FAILED;
-        }
-        if (bounded != ORBIT_CALL_OK) {
-            cmeta_mutex_unlock(&impl->mutex);
-            return bounded;
-        }
+    if (application_status != 0) {
+        /* No CMeta provider is called for an application-error terminal. */
+        slot->staged = true;
+        slot->application_status = application_status;
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_OK;
+    }
+    if (response == NULL) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_INVALID_ARGUMENT;
+    }
+    /* The original post-commit borrow pins both Port storage objects.
+     * Reserve STAGING before invoking any provider outside the Port mutex.
+     * A reentrant cancel/close may settle the local terminal, but it cannot
+     * recycle this slot while the original business borrow still executes.
+     */
+    slot->staging = true;
+    cmeta_mutex_unlock(&impl->mutex);
+
+    bounded = orbit_value_check_size(
+        impl->value_contract.response, response,
+        impl->value_contract.max_response_bytes);
+    if (bounded == ORBIT_CALL_OK &&
+        cmeta_data_value_copy(
+            impl->value_contract.response,
+            slot->owned_response.storage, response) != CMETA_OK)
+        bounded = ORBIT_CALL_VALUE_COPY_FAILED;
+
+    cmeta_mutex_lock(&impl->mutex);
+    if (slot->generation != generation || !slot->managed ||
+        !slot->staging || slot->executing != 1u)
+        abort(); /* only the original post-commit execution owner can end */
+    slot->staging = false;
+    if (impl->closed || slot->state != ORBIT_SLOT_ACTIVE ||
+        slot->cancel_requested) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_STALE;
+    }
+    if (bounded != ORBIT_CALL_OK) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return bounded; /* the generated owner emits NO_REPLY on observe */
     }
     slot->staged = true;
     slot->application_status = application_status;
@@ -1050,11 +1096,19 @@ orbit_call_status orbit_call_value_end(
         cmeta_mutex_unlock(&impl->mutex);
         return ORBIT_CALL_TYPE_MISMATCH;
     }
+    if (slot->staging) {
+        /* A reentrant Provider cannot drop the lifetime pin while its
+         * response is still being deep-copied into Port-owned storage.
+         */
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_BUSY;
+    }
     --impl->executing;
     slot->executing = 0u;
-    if (slot->state == ORBIT_SLOT_RETAINED)
-        orbit_call_release_slot_locked(slot);
+    const bool reclaim = slot->state == ORBIT_SLOT_RETAINED;
+    if (reclaim) slot->state = ORBIT_SLOT_RECLAIMING;
     cmeta_mutex_unlock(&impl->mutex);
+    if (reclaim) orbit_call_reclaim_slot(impl, slot);
     return ORBIT_CALL_OK;
 }
 
