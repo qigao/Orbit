@@ -50,6 +50,13 @@ dependency does not enter the Orbit/Provider includes or linked runtime.
 Native Context v1 is independent of the Configurator/ServiceHost ABI epoch;
 its single parser, generator and generated business signatures are unchanged.
 
+One `orbit_idl_codegen` build target owns the existing compiler command and all
+three generated outputs. Both native test executables depend on that owner;
+they do not each attach the custom rule to their own project. The first Windows
+run exposed concurrent invocations racing the compiler's output backup. The
+single-owner dependency fixes the build graph without disabling parallel
+compilation or changing the compiler's publication behavior.
+
 Local Linux tests against the actual installed runtime SDK pass Debug ACE+IDL
 7/7, Release ACE+IDL 7/7, and Release Core-only+IDL 4/4. The real generated DSO
 and two-Room CTests execute in these graphs. The existing native workflow must

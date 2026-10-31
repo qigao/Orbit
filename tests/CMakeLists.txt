@@ -97,10 +97,15 @@ if(ORBIT_IDL_CONFORMANCE)
             "${_orbit_idlc}"
     VERBATIM
     COMMENT "Generate Orbit unary Client/Dispatcher from canonical salts-idlc")
+  # One build owner invokes the compiler. Listing the same generated OUTPUT
+  # in two executable projects duplicates the custom rule under MSBuild, which
+  # can race the compiler's output backup/publication transaction.
+  add_custom_target(orbit_idl_codegen
+    DEPENDS "${_orbit_idl_records}" "${_orbit_idl_header}" "${_orbit_idl_source}")
   add_executable(orbit_generated_idl_native_test
     test_orbit_generated_idl.c test_orbit_generated_cpp17.cpp
-    test_orbit_multi_room.c
-    "${_orbit_idl_header}" "${_orbit_idl_records}")
+    test_orbit_multi_room.c)
+  add_dependencies(orbit_generated_idl_native_test orbit_idl_codegen)
   target_compile_features(orbit_generated_idl_native_test PRIVATE
     c_std_11 cxx_std_17)
   # Host SDK serves only the external generator PROCESS. Never admit its
@@ -116,8 +121,7 @@ if(ORBIT_IDL_CONFORMANCE)
   # With IDL conformance OFF, this test target is not created; there is
   # no stale hand-written Provider dispatch fallback.
   if(ORBIT_BUILD_ACE)
-    target_sources(orbit_scope_dso_native_test PRIVATE
-      "${_orbit_idl_header}" "${_orbit_idl_records}")
+    add_dependencies(orbit_scope_dso_native_test orbit_idl_codegen)
     target_include_directories(orbit_scope_dso_native_test PRIVATE
       "${_orbit_idl_dir}")
   endif()
