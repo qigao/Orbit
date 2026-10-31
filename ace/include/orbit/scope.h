@@ -13,7 +13,7 @@ extern "C" {
 
 /*
  * Optional Orbit::ACE integration. This API is a lifetime guard around
- * Salts::ServiceHost's ORIGINAL, noncopyable scope. It is NOT a second
+ * Salts::ACE's ORIGINAL, noncopyable scope. It is NOT a second
  * Configurator, Plugin loader, generation controller or Scope implementation.
  *
  * A guard is one address-stable, noncopyable owner. It must be opened BEFORE

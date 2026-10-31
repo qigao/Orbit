@@ -1,7 +1,8 @@
-# M0 — installed Configurator/ServiceHost ABI 2
+# M0 — ACE / Provider targets and native ABI 2
 
 This stacked Draft continues Orbit #19 and consumes the breaking native API in
-[Salts #1332](https://github.com/qigao/salts/pull/1332). It is an application
+[Salts #1332](https://github.com/qigao/salts/pull/1332), followed by the ACE/Provider
+CMake consolidation in [Salts #1336](https://github.com/qigao/salts/pull/1336). It is an application
 migration and executable downstream qualification, not an SDK release.
 
 ## Runtime boundary
@@ -10,7 +11,8 @@ Both the Orbit build and its installed package require `Salts 4.0`. Static
 Provider construction uses `salts_configurator_provider_binding`,
 `salts_configurator_dependency` and binding ABI version 2. Dynamic Providers
 include `<salts/service_host_provider_abi.h>` and link only
-`Salts::ServiceHostProviderABI` plus `Salts::PluginABI`. Their reflected
+`Salts::Provider`, which carries the CMeta/Plugin contracts without linking
+the ACE runtime. Orbit::ACE links `Salts::ACE`. The reflected
 `salts_service_host_provider` Interface publishes the current version-2
 contract and borrowed binding. No compatibility type, old header or fallback
 contract is supplied by Orbit.
@@ -40,7 +42,7 @@ discarded hand-written DSO adapter remains absent.
 
 | Input | Identity |
 | --- | --- |
-| Salts runtime | `0f0b44f578366d18ced27c6e48694a54938d0d95` — Salts 4.0 / ABI 2.0 |
+| Salts runtime | `48999ae4204fb88bce206945f324afa6dd4dc57d` — Salts 4.0 / ABI 2.0, ACE / Provider targets |
 | Core runtime | `cfc1ed0d24364689b10ef7a85cff28d8776eb7db` — Core 0.1 |
 | Canonical host compiler | SaltsUtils `852b5cc741ef0debb1735b03e129bb30a136f038` |
 | Host artifact run | `41168655686`, Linux/Windows native SDKs |

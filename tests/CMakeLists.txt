@@ -34,7 +34,7 @@ if(ORBIT_BUILD_ACE)
     foreach(provider IN ITEMS orbit_dso_provider_n orbit_dso_provider_next)
       target_compile_features(${provider} PRIVATE c_std_11)
       target_link_libraries(${provider}
-        PRIVATE Salts::ServiceHostProviderABI Salts::PluginABI)
+        PRIVATE Salts::Provider)
     endforeach()
     target_compile_definitions(orbit_dso_provider_n
       PRIVATE ORBIT_DSO_PROVIDER_INDEX=1)
