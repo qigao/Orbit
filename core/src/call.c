@@ -644,3 +644,425 @@ orbit_call_status orbit_call_port_try_destroy(orbit_call_port *port) {
     port->impl = NULL;
     return ORBIT_CALL_OK;
 }
+
+
+/*
+ * The only managed Native slice: canonical owning byte buffers or one CMeta
+ * V2 VALUE record whose leaves are primitive or owned byte buffers. A VIEW,
+ * nested record, collection, nullable overlay or unknown provider is NOT
+ * promoted to an owning request by guessing at its physical representation.
+ */
+static bool orbit_value_buffer_shape(const cmeta_data_desc *data) {
+    const cmeta_data_buffer_ops *ops;
+    if (data == NULL || !cmeta_data_desc_valid(data) ||
+        (data->kind != CMETA_DATA_STRING &&
+         data->kind != CMETA_DATA_BYTES) ||
+        data->buffer_ops == NULL)
+        return false;
+    ops = data->buffer_ops;
+    return ops->struct_size >= sizeof(*ops) &&
+        ops->abi_version == CMETA_DATA_BUFFER_OPS_ABI_VERSION &&
+        ops->ownership == CMETA_DATA_BUFFER_OWNED &&
+        ops->read != NULL && ops->init_zero != NULL &&
+        ops->restore_zero != NULL && ops->move != NULL;
+}
+
+static bool orbit_value_type_admitted(const cmeta_data_desc *data,
+                                      size_t limit) {
+    const cmeta_data_reflection_shape *shape;
+    size_t index;
+    bool has_buffer = false;
+    if (data == NULL || !cmeta_data_desc_valid(data) ||
+        data->storage_type == NULL ||
+        !cmeta_data_value_traits_supported(data) ||
+        data->storage_type->size == 0u ||
+        /* Hard limit deliberately conservative; every activation must also
+         * provide its own smaller explicit total dynamic byte budget.
+         */
+        limit == 0u || limit > 65536u)
+        return false;
+    if (orbit_value_buffer_shape(data))
+        return true;
+    if (data->kind != CMETA_DATA_STRUCT ||
+        data->abi_version != CMETA_DATA_DESC_REFLECTION_ABI_VERSION ||
+        data->shape == NULL)
+        return false;
+    shape = (const cmeta_data_reflection_shape *)data->shape;
+    if (shape->struct_size < sizeof(*shape) ||
+        shape->mode != CMETA_DATA_REFLECTION_VALUE ||
+        shape->structure.field_count == 0u ||
+        shape->structure.field_count > CMETA_DATA_REFLECTION_MAX_FIELDS ||
+        shape->structure.fields == NULL)
+        return false;
+    for (index = 0u; index < shape->structure.field_count; ++index) {
+        const cmeta_data_field_desc *field = &shape->structure.fields[index];
+        const cmeta_data_desc *member = field->value;
+        if (member == NULL || !cmeta_data_desc_valid(member) ||
+            member->storage_type == NULL ||
+            field->offset > data->storage_type->size ||
+            member->storage_type->size >
+                data->storage_type->size - field->offset)
+            return false;
+        if (member->kind == CMETA_DATA_STRING ||
+            member->kind == CMETA_DATA_BYTES) {
+            if (!orbit_value_buffer_shape(member)) return false;
+            has_buffer = true;
+        } else if (member->kind != CMETA_DATA_BOOL &&
+                   member->kind != CMETA_DATA_SINT &&
+                   member->kind != CMETA_DATA_UINT &&
+                   member->kind != CMETA_DATA_FLOAT) {
+            return false; /* no nested/collection/VIEW fallback */
+        }
+    }
+    return has_buffer;
+}
+
+/* Read-only pre-copy budget validation using the canonical BufferOps. */
+static orbit_call_status orbit_value_check_size(
+    const cmeta_data_desc *data, const void *value, size_t budget) {
+    const cmeta_data_reflection_shape *shape;
+    size_t i, used = 0u;
+    if (value == NULL) return ORBIT_CALL_INVALID_ARGUMENT;
+    if (data->kind == CMETA_DATA_STRING || data->kind == CMETA_DATA_BYTES) {
+        const unsigned char *bytes = NULL;
+        size_t size = 0u;
+        const cmeta_status s = cmeta_data_buffer_read(
+            data, value, budget, &bytes, &size);
+        return s == CMETA_OK ? ORBIT_CALL_OK :
+            (s == CMETA_CAPACITY_EXCEEDED ? ORBIT_CALL_VALUE_TOO_LARGE :
+                                           ORBIT_CALL_VALUE_COPY_FAILED);
+    }
+    shape = (const cmeta_data_reflection_shape *)data->shape;
+    for (i = 0u; i < shape->structure.field_count; ++i) {
+        const cmeta_data_field_desc *field = &shape->structure.fields[i];
+        if (field->value->kind == CMETA_DATA_STRING ||
+            field->value->kind == CMETA_DATA_BYTES) {
+            const unsigned char *bytes = NULL;
+            size_t size = 0u;
+            const cmeta_status s = cmeta_data_buffer_read(
+                field->value, (const unsigned char *)value + field->offset,
+                budget - used, &bytes, &size);
+            if (s != CMETA_OK)
+                return s == CMETA_CAPACITY_EXCEEDED ?
+                    ORBIT_CALL_VALUE_TOO_LARGE :
+                    ORBIT_CALL_VALUE_COPY_FAILED;
+            used += size;
+        }
+    }
+    return ORBIT_CALL_OK;
+}
+
+/* Executed only on the unexposed initial Port after partial init failure. */
+static void orbit_value_init_abort(orbit_call_port *port) {
+    orbit_call_impl *impl = orbit_call_live(port);
+    size_t i;
+    if (impl == NULL) return;
+    for (i = 0u; i < impl->capacity; ++i) {
+        cmeta_data_temp_close(&impl->slots[i].owned_request);
+        cmeta_data_temp_close(&impl->slots[i].owned_response);
+    }
+    orbit_service_ref_release(&impl->actor_pin);
+    cmeta_mutex_destroy(&impl->mutex);
+    free(impl->slots);
+    free(impl);
+    port->impl = NULL;
+}
+
+orbit_call_status orbit_call_port_init_value(
+    orbit_call_port *port, const orbit_service *owner, size_t capacity,
+    const orbit_call_value_contract *contract) {
+    orbit_call_impl *impl;
+    orbit_call_status result;
+    size_t i;
+    bool found = false;
+    if (contract == NULL || owner == NULL ||
+        contract->method == 0u ||
+        !orbit_value_type_admitted(contract->request,
+                                  contract->max_request_bytes) ||
+        !orbit_value_type_admitted(contract->response,
+                                  contract->max_response_bytes))
+        return ORBIT_CALL_INVALID_ARGUMENT;
+    for (i = 0u; i < owner->method_count; ++i) {
+        const orbit_service_method *method = &owner->methods[i];
+        if (method->id == contract->method &&
+            method->flags == ORBIT_METHOD_CALL_TOKEN &&
+            cmeta_type_equal(method->request_type, &cmeta_type_uint64)) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) return ORBIT_CALL_TYPE_MISMATCH;
+    result = orbit_call_port_init(port, owner, capacity);
+    if (result != ORBIT_CALL_OK) return result;
+    impl = orbit_call_live(port);
+    impl->value_contract = *contract; /* only canonical descriptors borrowed */
+    for (i = 0u; i < capacity; ++i) {
+        if (cmeta_data_temp_open(
+                contract->request, contract->request->storage_type->size,
+                &impl->slots[i].owned_request) != CMETA_OK ||
+            cmeta_data_temp_open(
+                contract->response, contract->response->storage_type->size,
+                &impl->slots[i].owned_response) != CMETA_OK) {
+            orbit_value_init_abort(port);
+            return ORBIT_CALL_ALLOCATION_FAILED;
+        }
+    }
+    impl->value_enabled = true;
+    return ORBIT_CALL_OK;
+}
+
+orbit_call_status orbit_call_value_async(
+    orbit_call_port *port, const orbit_service_ref *service,
+    orbit_method_id method, const void *request,
+    orbit_call_value_terminal_fn terminal, void *user,
+    uint64_t *out_token, cflow_actor_send_status *out_send) {
+    orbit_call_impl *impl = orbit_call_live(port);
+    orbit_call_slot *slot = NULL;
+    orbit_call_delivery delivery = {0};
+    cflow_event_id event_id = 0u;
+    bool found = false;
+    size_t index;
+    uint64_t token;
+    cflow_actor_send_status send_status;
+    orbit_call_status bound;
+    bool accepted;
+
+    if (out_token != NULL) *out_token = 0u;
+    if (out_send != NULL) *out_send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    if (impl == NULL || !impl->value_enabled || request == NULL ||
+        terminal == NULL || out_token == NULL || out_send == NULL ||
+        service == NULL || method != impl->value_contract.method ||
+        impl->actor_identity != service->actor.impl ||
+        impl->methods != service->methods ||
+        impl->method_count != service->method_count)
+        return ORBIT_CALL_INVALID_ARGUMENT;
+    if (!orbit_call_method_is_token(service, method, &found, &event_id))
+        return found ? ORBIT_CALL_TYPE_MISMATCH :
+                       ORBIT_CALL_INVALID_ARGUMENT;
+    /* The caller owns this immutable value until admission returns. */
+    bound = orbit_value_check_size(
+        impl->value_contract.request, request,
+        impl->value_contract.max_request_bytes);
+    if (bound != ORBIT_CALL_OK) return bound;
+
+    cmeta_mutex_lock(&impl->mutex);
+    if (impl->closed) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_CLOSED;
+    }
+    for (index = 0u; index < impl->capacity; ++index) {
+        orbit_call_slot *candidate = &impl->slots[index];
+        if (candidate->state == ORBIT_SLOT_FREE &&
+            candidate->generation < UINT32_MAX) {
+            slot = candidate;
+            break;
+        }
+    }
+    if (slot == NULL) {
+        ++impl->rejected_full;
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_FULL;
+    }
+    ++slot->generation;
+    token = orbit_call_token(index, slot->generation);
+    slot->state = ORBIT_SLOT_ADMITTING;
+    slot->managed = true;
+    slot->executing = 0u;
+    slot->cancel_requested = false;
+    slot->staged = false;
+    slot->observed = false;
+    slot->method = method;
+    slot->callback = NULL;
+    slot->value_callback = terminal;
+    slot->callback_user = user;
+    ++impl->submitting;
+    cmeta_mutex_unlock(&impl->mutex);
+
+    /* Borrowed provider DataDesc executes while the slot is ADMITTING.
+     * No accepted Event exists yet, and the submitting credit prevents
+     * destroy while the canonical owning deep-copy runs.
+     */
+    if (cmeta_data_value_copy(
+            impl->value_contract.request,
+            slot->owned_request.storage, request) != CMETA_OK) {
+        cmeta_mutex_lock(&impl->mutex);
+        --impl->submitting;
+        ++impl->rejected;
+        orbit_call_release_slot_locked(slot);
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_VALUE_COPY_FAILED; /* zero token, no callback */
+    }
+
+    /* Close might have won during the deep clone, before any CFlow send. */
+    cmeta_mutex_lock(&impl->mutex);
+    if (impl->closed) {
+        --impl->submitting;
+        orbit_call_release_slot_locked(slot);
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_CLOSED;
+    }
+    cmeta_mutex_unlock(&impl->mutex);
+
+    {
+        const cflow_event_view event = {
+            event_id, &cmeta_type_uint64, &token
+        };
+        send_status = cflow_actor_ref_try_send(&service->actor, &event);
+    }
+    accepted = send_status == CFLOW_ACTOR_SEND_ACCEPTED;
+    cmeta_mutex_lock(&impl->mutex);
+    --impl->submitting;
+    if (!accepted) {
+        ++impl->rejected;
+        orbit_call_release_slot_locked(slot);
+    } else {
+        ++impl->admitted;
+        slot->state = ORBIT_SLOT_ACTIVE;
+        if (impl->closed)
+            orbit_call_terminal_locked(
+                impl, slot, token, impl->close_reason, &delivery);
+        else if (slot->cancel_requested)
+            orbit_call_terminal_locked(
+                impl, slot, token, ORBIT_CALL_TERMINAL_CANCELLED, &delivery);
+        else if (slot->observed)
+            orbit_call_terminal_locked(impl, slot, token,
+                !slot->staged ? ORBIT_CALL_TERMINAL_NO_REPLY :
+                (slot->application_status == 0 ?
+                    ORBIT_CALL_TERMINAL_SUCCESS :
+                    ORBIT_CALL_TERMINAL_APPLICATION_ERROR), &delivery);
+    }
+    cmeta_mutex_unlock(&impl->mutex);
+    *out_send = send_status;
+    if (!accepted) return ORBIT_CALL_REJECTED;
+    *out_token = token;
+    orbit_call_deliver(impl, &delivery);
+    return ORBIT_CALL_OK;
+}
+
+orbit_call_status orbit_call_value_begin(
+    orbit_call_port *port, uint64_t token,
+    orbit_method_id expected_method, const void **out_request) {
+    orbit_call_impl *impl = orbit_call_live(port);
+    orbit_call_slot *slot;
+    if (out_request != NULL) *out_request = NULL;
+    if (impl == NULL || !impl->value_enabled ||
+        token == 0u || expected_method == 0u || out_request == NULL)
+        return ORBIT_CALL_INVALID_ARGUMENT;
+    cmeta_mutex_lock(&impl->mutex);
+    slot = orbit_call_lookup_locked(impl, token);
+    if (slot == NULL || !slot->managed ||
+        impl->closed || slot->cancel_requested || slot->observed) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_STALE;
+    }
+    if (slot->method != expected_method) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_TYPE_MISMATCH;
+    }
+    if (slot->executing != 0u) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_DUPLICATE;
+    }
+    slot->executing = 1u; /* sole Actor post-commit owner */
+    ++impl->executing;
+    *out_request = slot->owned_request.storage;
+    cmeta_mutex_unlock(&impl->mutex);
+    return ORBIT_CALL_OK;
+}
+
+orbit_call_status orbit_call_value_stage_reply(
+    orbit_call_port *port, uint64_t token, orbit_method_id expected_method,
+    int application_status, const void *response) {
+    orbit_call_impl *impl = orbit_call_live(port);
+    orbit_call_slot *slot;
+    orbit_call_status bounded = ORBIT_CALL_OK;
+    cmeta_status copy_status = CMETA_OK;
+    if (impl == NULL || !impl->value_enabled ||
+        token == 0u || expected_method == 0u)
+        return ORBIT_CALL_INVALID_ARGUMENT;
+    cmeta_mutex_lock(&impl->mutex);
+    slot = orbit_call_lookup_locked(impl, token);
+    if (slot == NULL || !slot->managed || impl->closed ||
+        slot->cancel_requested) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_STALE;
+    }
+    if (slot->method != expected_method) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_TYPE_MISMATCH;
+    }
+    if (slot->staged || slot->observed || slot->executing != 1u) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_DUPLICATE;
+    }
+    if (application_status == 0) {
+        if (response == NULL) {
+            cmeta_mutex_unlock(&impl->mutex);
+            return ORBIT_CALL_INVALID_ARGUMENT;
+        }
+        bounded = orbit_value_check_size(
+            impl->value_contract.response, response,
+            impl->value_contract.max_response_bytes);
+        if (bounded == ORBIT_CALL_OK) {
+            copy_status = cmeta_data_value_copy(
+                impl->value_contract.response,
+                slot->owned_response.storage, response);
+            if (copy_status != CMETA_OK)
+                bounded = ORBIT_CALL_VALUE_COPY_FAILED;
+        }
+        if (bounded != ORBIT_CALL_OK) {
+            cmeta_mutex_unlock(&impl->mutex);
+            return bounded;
+        }
+    }
+    slot->staged = true;
+    slot->application_status = application_status;
+    cmeta_mutex_unlock(&impl->mutex);
+    return ORBIT_CALL_OK;
+}
+
+orbit_call_status orbit_call_value_end(
+    orbit_call_port *port, uint64_t token, orbit_method_id expected_method) {
+    orbit_call_impl *impl = orbit_call_live(port);
+    orbit_call_slot *slot;
+    const uint32_t index = (uint32_t)token;
+    const uint32_t generation = (uint32_t)(token >> 32);
+    if (impl == NULL || !impl->value_enabled || index == 0u ||
+        (size_t)(index - 1u) >= impl->capacity || generation == 0u ||
+        expected_method == 0u)
+        return ORBIT_CALL_INVALID_ARGUMENT;
+    cmeta_mutex_lock(&impl->mutex);
+    slot = &impl->slots[index - 1u];
+    if (slot->generation != generation || !slot->managed ||
+        slot->executing != 1u ||
+        slot->state == ORBIT_SLOT_FREE) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_STALE;
+    }
+    if (slot->method != expected_method) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_TYPE_MISMATCH;
+    }
+    --impl->executing;
+    slot->executing = 0u;
+    if (slot->state == ORBIT_SLOT_RETAINED)
+        orbit_call_release_slot_locked(slot);
+    cmeta_mutex_unlock(&impl->mutex);
+    return ORBIT_CALL_OK;
+}
+
+orbit_call_status orbit_call_value_observe(
+    orbit_call_port *port, uint64_t token) {
+    orbit_call_impl *impl = orbit_call_live(port);
+    orbit_call_slot *slot;
+    if (impl == NULL || !impl->value_enabled || token == 0u)
+        return ORBIT_CALL_INVALID_ARGUMENT;
+    cmeta_mutex_lock(&impl->mutex);
+    slot = orbit_call_lookup_locked(impl, token);
+    if (slot == NULL || !slot->managed) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_STALE;
+    }
+    cmeta_mutex_unlock(&impl->mutex);
+    return orbit_call_u64_observe(port, token); /* same terminal owner */
+}
