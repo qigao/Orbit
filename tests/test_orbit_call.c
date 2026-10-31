@@ -5,8 +5,7 @@
 #include <cflow/machine.h>
 #include <cflow/scheduler.h>
 #include <cmeta/cmeta.h>
-#include <cmeta_cmeta_data.h>
-#include <cstl/byte_buffer.h>
+#include <cmeta/data.h>
 #include <salts/thread.h>
 
 #include <stdatomic.h>
@@ -20,6 +19,108 @@
         abort(); \
     } \
 } while (0)
+
+
+/*
+ * Test-only, fault-injectable CMeta DATA_BYTES v2 provider. It is NOT a
+ * second production buffer engine: the real Orbit Port never inspects these
+ * fields and uses only the same canonical cmeta_data_value_* operations
+ * required by SaltsUtils NativeSourceIR. Deliberately do not assume the
+ * optional CSTL SDK target exists in the installed Salts ServiceHost image.
+ */
+typedef struct test_owned_bytes {
+    unsigned char *data;
+    size_t size;
+} test_owned_bytes;
+
+static atomic_bool test_owned_fail_copy;
+
+static bool test_owned_is_zero(const void *object) {
+    const test_owned_bytes *v = (const test_owned_bytes *)object;
+    return v && v->data == NULL && v->size == 0u;
+}
+static cmeta_status test_owned_init_zero(void *object) {
+    if (!object) return CMETA_INVALID_ARGUMENT;
+    *(test_owned_bytes *)object = (test_owned_bytes){0};
+    return CMETA_OK;
+}
+static void test_owned_restore_zero(void *object) {
+    test_owned_bytes *v = (test_owned_bytes *)object;
+    if (!v) return;
+    free(v->data);
+    *v = (test_owned_bytes){0};
+}
+static cmeta_status test_owned_assign(
+    void *object, const unsigned char *data, size_t size, size_t max_bytes) {
+    test_owned_bytes *v = (test_owned_bytes *)object;
+    unsigned char *copy;
+    if (!v || (size && !data) || !test_owned_is_zero(v))
+        return CMETA_INVALID_ARGUMENT;
+    if (size > max_bytes) return CMETA_CAPACITY_EXCEEDED;
+    if (atomic_load(&test_owned_fail_copy)) return CMETA_OUT_OF_MEMORY;
+    if (size == 0u) return CMETA_OK;
+    copy = (unsigned char *)malloc(size);
+    if (!copy) return CMETA_OUT_OF_MEMORY;
+    memcpy(copy, data, size);
+    v->data = copy;
+    v->size = size;
+    return CMETA_OK;
+}
+static cmeta_status test_owned_read(
+    const void *object, const unsigned char **out_data, size_t *out_size) {
+    const test_owned_bytes *v = (const test_owned_bytes *)object;
+    if (!v || !out_data || !out_size || (v->size && !v->data))
+        return CMETA_INVALID_ARGUMENT;
+    *out_data = v->data;
+    *out_size = v->size;
+    return CMETA_OK;
+}
+static void test_owned_move(void *destination, void *source) {
+    test_owned_bytes *dst = (test_owned_bytes *)destination;
+    test_owned_bytes *src = (test_owned_bytes *)source;
+    CHECK(dst && src && dst != src && test_owned_is_zero(dst));
+    *dst = *src;
+    *src = (test_owned_bytes){0};
+}
+static const cmeta_type_identity test_owned_identity =
+    CMETA_TYPE_ID_ATOM_INIT("orbit.test.managed.bytes.v1");
+static const cmeta_type_desc test_owned_cmeta_type = {
+    "test_owned_bytes", sizeof(test_owned_bytes),
+    CMETA_ALIGNOF(test_owned_bytes), CMETA_T_OBJECT, NULL, NULL,
+    &test_owned_identity
+};
+static const cmeta_data_buffer_shape test_owned_shape = {
+    CMETA_DATA_BUFFER_OWNED
+};
+static const cmeta_data_buffer_ops test_owned_ops = {
+    sizeof(cmeta_data_buffer_ops), CMETA_DATA_BUFFER_OPS_ABI_VERSION,
+    &test_owned_cmeta_type, CMETA_DATA_BUFFER_OWNED,
+    test_owned_is_zero, test_owned_assign, test_owned_restore_zero,
+    test_owned_read, test_owned_init_zero, test_owned_move
+};
+static const cmeta_data_desc test_owned_cmeta_data = {
+    .struct_size = sizeof(cmeta_data_desc),
+    .abi_version = CMETA_DATA_DESC_ABI_VERSION,
+    .stable_id = "orbit.test.managed.bytes.v1",
+    .display_name = "test_owned_bytes",
+    .kind = CMETA_DATA_BYTES,
+    .storage_type = &test_owned_cmeta_type,
+    .shape = &test_owned_shape,
+    .buffer_ops = &test_owned_ops
+};
+static bool test_owned_from(
+    test_owned_bytes *out, const unsigned char *data,
+    size_t size, size_t max_bytes) {
+    return test_owned_assign(out, data, size, max_bytes) == CMETA_OK;
+}
+static bool test_owned_resize(test_owned_bytes *out, size_t size) {
+    unsigned char bytes[64] = {0};
+    if (size > sizeof(bytes)) return false;
+    return test_owned_from(out, bytes, size, sizeof(bytes));
+}
+static void test_owned_destroy(test_owned_bytes *out) {
+    test_owned_restore_zero(out);
+}
 
 typedef struct call_probe {
     orbit_call_port *port;
@@ -222,7 +323,7 @@ static bool call_owned_observe(void *user, const cmeta_type_desc *type,
     const void *borrowed = NULL;
     uint64_t token;
     orbit_call_status status;
-    stl_byte_buffer reply = {0};
+    test_owned_bytes reply = {0};
     const unsigned char expected[] = {0u, 0xFFu, 0x42u, 0x80u};
     size_t checks = 0u;
     CHECK(f != NULL && value != NULL);
@@ -244,17 +345,17 @@ static bool call_owned_observe(void *user, const cmeta_type_desc *type,
         CHECK(atomic_load(&f->probe.release_owned_business));
     }
     {
-        const stl_byte_buffer *request = (const stl_byte_buffer *)borrowed;
-        CHECK(stl_byte_buffer_size(request) == sizeof(expected));
-        CHECK(memcmp(stl_byte_buffer_data((stl_byte_buffer *)request),
+        const test_owned_bytes *request = (const test_owned_bytes *)borrowed;
+        CHECK(test_owned_bytes_size(request) == sizeof(expected));
+        CHECK(memcmp(test_owned_bytes_data((test_owned_bytes *)request),
                      expected, sizeof(expected)) == 0);
     }
-    CHECK(stl_byte_buffer_from(
-        &reply, expected, sizeof(expected), 32u) == STL_OK);
+    CHECK(test_owned_bytes_from(
+        &reply, expected, sizeof(expected), 32u));
     status = orbit_call_value_stage_reply(
         &f->calls, token, 10u, 0, &reply);
     CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
-    stl_byte_buffer_destroy(&reply); /* application still owns the reply */
+    test_owned_bytes_destroy(&reply); /* application still owns the reply */
     CHECK(orbit_call_value_end(&f->calls, token, 10u) == ORBIT_CALL_OK);
     status = orbit_call_value_observe(&f->calls, token);
     CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
@@ -274,9 +375,9 @@ static void call_owned_terminal(
     CHECK(stats.callbacks_inflight >= 1u);
     atomic_fetch_add(&p->callback_count, 1);
     if (outcome == ORBIT_CALL_TERMINAL_SUCCESS) {
-        const stl_byte_buffer *bytes = (const stl_byte_buffer *)response;
-        CHECK(bytes != NULL && stl_byte_buffer_size(bytes) == sizeof(expected));
-        CHECK(memcmp(stl_byte_buffer_data((stl_byte_buffer *)bytes),
+        const test_owned_bytes *bytes = (const test_owned_bytes *)response;
+        CHECK(bytes != NULL && test_owned_bytes_size(bytes) == sizeof(expected));
+        CHECK(memcmp(test_owned_bytes_data((test_owned_bytes *)bytes),
                      expected, sizeof(expected)) == 0);
         atomic_fetch_add(&p->successes, 1);
     } else if (outcome == ORBIT_CALL_TERMINAL_CANCELLED) {
@@ -378,8 +479,8 @@ static void fixture_prepare_ex(call_fixture *fixture, size_t mailbox_capacity,
           .status == ORBIT_SERVICE_OK);
     if (managed) {
         const orbit_call_value_contract contract = {
-            10u, &stl_byte_buffer_cmeta_data,
-            &stl_byte_buffer_cmeta_data, 32u, 32u
+            10u, &test_owned_cmeta_data,
+            &test_owned_cmeta_data, 32u, 32u
         };
         CHECK(orbit_call_port_init_value(
             &fixture->calls, &fixture->service,
@@ -1100,15 +1201,15 @@ static void test_concurrent_close_during_admission(void) {
  */
 static void test_owned_value_deepcopy_and_capacity(void) {
     call_fixture f;
-    stl_byte_buffer source = {0};
-    stl_byte_buffer oversize = {0};
+    test_owned_bytes source = {0};
+    test_owned_bytes oversize = {0};
     const unsigned char raw[] = {0u, 0xFFu, 0x42u, 0x80u};
     orbit_call_port_stats stats = {0};
     uint64_t token = 0u, rejected = UINT64_MAX;
     cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
 
     fixture_prepare_ex(&f, 2u, 1u, true);
-    CHECK(stl_byte_buffer_from(&source, raw, sizeof(raw), 32u) == STL_OK);
+    CHECK(test_owned_bytes_from(&source, raw, sizeof(raw), 32u));
     CHECK(orbit_call_value_async(
         &f.calls, &f.ref, 10u, &source,
         call_owned_terminal, &f.probe, &token, &send) == ORBIT_CALL_OK);
@@ -1125,8 +1226,8 @@ static void test_owned_value_deepcopy_and_capacity(void) {
     CHECK(orbit_call_port_get_stats(&f.calls, &stats));
     CHECK(stats.occupied == 1u && stats.rejected_full == 1u);
     /* In-place mutation cannot change the Port-owned deep clone. */
-    stl_byte_buffer_data(&source)[1] = 0x11u;
-    stl_byte_buffer_destroy(&source);
+    test_owned_bytes_data(&source)[1] = 0x11u;
+    test_owned_bytes_destroy(&source);
     fixture_drive_until(&f, &f.probe.successes, 1);
     CHECK(atomic_load(&f.probe.business_executions) == 1);
     CHECK(atomic_load(&f.probe.callback_count) == 1);
@@ -1140,13 +1241,13 @@ static void test_owned_value_deepcopy_and_capacity(void) {
         CHECK(expired_request == NULL);
     }
 
-    CHECK(stl_byte_buffer_resize(&oversize, 33u) == STL_OK);
+    CHECK(test_owned_bytes_resize(&oversize, 33u));
     CHECK(orbit_call_value_async(
         &f.calls, &f.ref, 10u, &oversize,
         call_owned_terminal, &f.probe,
         &rejected, &send) == ORBIT_CALL_VALUE_TOO_LARGE);
     CHECK(rejected == 0u && atomic_load(&f.probe.callback_count) == 1);
-    stl_byte_buffer_destroy(&oversize);
+    test_owned_bytes_destroy(&oversize);
     fixture_destroy(&f);
 }
 
@@ -1161,7 +1262,7 @@ static void cancel_while_owned_request_borrowed(void *user) {
     owned_cancel_context *ctx = (owned_cancel_context *)user;
     call_fixture *f = ctx->fixture;
     orbit_call_port_stats stats = {0};
-    stl_byte_buffer input = {0};
+    test_owned_bytes input = {0};
     const unsigned char raw[] = {0u, 0xFFu, 0x42u, 0x80u};
     cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
     uint64_t rejected = UINT64_MAX;
@@ -1175,12 +1276,12 @@ static void cancel_while_owned_request_borrowed(void *user) {
     CHECK(orbit_call_port_get_stats(&f->calls, &stats));
     CHECK(stats.executing == 1u && stats.occupied == 1u);
     CHECK(stats.callbacks_inflight == 0u && stats.cancelled == 1u);
-    CHECK(stl_byte_buffer_from(&input, raw, sizeof(raw), 32u) == STL_OK);
+    CHECK(test_owned_bytes_from(&input, raw, sizeof(raw), 32u));
     atomic_store(&ctx->full_result, (int)orbit_call_value_async(
         &f->calls, &f->ref, 10u, &input, call_owned_terminal, &f->probe,
         &rejected, &send));
     CHECK(rejected == 0u);
-    stl_byte_buffer_destroy(&input);
+    test_owned_bytes_destroy(&input);
     atomic_store(&f->probe.release_owned_business, true);
 }
 
@@ -1192,7 +1293,7 @@ static void test_owned_execution_cancel_keeps_request(void) {
     call_fixture f;
     owned_cancel_context ctx = {0};
     cmeta_thread_t thread = NULL;
-    stl_byte_buffer input = {0};
+    test_owned_bytes input = {0};
     const unsigned char raw[] = {0u, 0xFFu, 0x42u, 0x80u};
     uint64_t token = 0u;
     cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
@@ -1200,12 +1301,12 @@ static void test_owned_execution_cancel_keeps_request(void) {
 
     fixture_prepare_ex(&f, 2u, 1u, true);
     atomic_store(&f.probe.hold_owned_business, true);
-    CHECK(stl_byte_buffer_from(&input, raw, sizeof(raw), 32u) == STL_OK);
+    CHECK(test_owned_bytes_from(&input, raw, sizeof(raw), 32u));
     CHECK(orbit_call_value_async(
         &f.calls, &f.ref, 10u, &input,
         call_owned_terminal, &f.probe, &token, &send) == ORBIT_CALL_OK);
     CHECK(send == CFLOW_ACTOR_SEND_ACCEPTED);
-    stl_byte_buffer_destroy(&input);
+    test_owned_bytes_destroy(&input);
     ctx.fixture = &f;
     ctx.token = token;
     atomic_init(&ctx.result, ORBIT_CALL_BUSY);
@@ -1227,11 +1328,11 @@ static void test_owned_execution_cancel_keeps_request(void) {
 
     /* Reuse is legal only AFTER the owned request execution borrow exits. */
     atomic_store(&f.probe.hold_owned_business, false);
-    CHECK(stl_byte_buffer_from(&input, raw, sizeof(raw), 32u) == STL_OK);
+    CHECK(test_owned_bytes_from(&input, raw, sizeof(raw), 32u));
     CHECK(orbit_call_value_async(
         &f.calls, &f.ref, 10u, &input,
         call_owned_terminal, &f.probe, &token, &send) == ORBIT_CALL_OK);
-    stl_byte_buffer_destroy(&input);
+    test_owned_bytes_destroy(&input);
     fixture_drive_until(&f, &f.probe.successes, 1);
     CHECK(atomic_load(&f.probe.callback_count) == 2);
     CHECK(orbit_call_port_get_stats(&f.calls, &stats));
