@@ -693,6 +693,302 @@ static void test_two_method_owner_dispatch(void) {
     fixture_destroy(&f);
 }
 
+
+/*
+ * M0h: the real CFlow Actor remains single-owner, while independent native
+ * producer threads contend for the same bounded Orbit CallPort. There is
+ * no test-only Actor, response queue or new runtime. Cancellation, close
+ * and callbacks may race on distinct threads; every accepted call must
+ * receive exactly one terminal, even if close wins during ADMITTING.
+ */
+enum { CALL_RACE_SENDERS = 8, CALL_RACE_ROUNDS = 8 };
+
+typedef struct call_race_gate {
+    atomic_int ready;
+    atomic_bool start;
+} call_race_gate;
+
+typedef struct call_race_sender {
+    call_fixture *fixture;
+    call_race_gate *gate;
+    orbit_service_ref producer;
+    unsigned ordinal;
+    atomic_int terminals;
+    atomic_int cancelled;
+    atomic_int stopped;
+    orbit_call_status result;
+    cflow_actor_send_status send;
+    uint64_t token;
+} call_race_sender;
+
+typedef struct call_race_settle {
+    orbit_call_port *port;
+    call_race_gate *gate;
+    uint64_t token;
+    bool close_port;
+    orbit_call_status result;
+} call_race_settle;
+
+static void call_race_gate_init(call_race_gate *gate) {
+    atomic_init(&gate->ready, 0);
+    atomic_init(&gate->start, false);
+}
+
+static void call_race_gate_wait(call_race_gate *gate) {
+    size_t checks = 0u;
+    atomic_fetch_add(&gate->ready, 1);
+    while (!atomic_load(&gate->start) && checks++ < 10000u)
+        cmeta_sleep_ms(1u);
+    CHECK(atomic_load(&gate->start));
+}
+
+static void call_race_begin(call_race_gate *gate, int participants) {
+    size_t checks = 0u;
+    while (atomic_load(&gate->ready) != participants &&
+           checks++ < 10000u)
+        cmeta_sleep_ms(1u);
+    CHECK(atomic_load(&gate->ready) == participants);
+    atomic_store(&gate->start, true);
+}
+
+/*
+ * A terminal callback can execute on the close/cancel/submitting thread.
+ * The slot stays COMPLETING for the full callback, so its own token must
+ * already be STALE. Per-attempt atomics forbid duplicated terminal delivery.
+ */
+static void call_race_terminal(
+    void *user, uint64_t token, orbit_call_terminal terminal,
+    int application_status, uint64_t response) {
+    call_race_sender *sender = (call_race_sender *)user;
+    CHECK(sender != NULL && token != 0u);
+    CHECK(application_status == 0 && response == 0u);
+    CHECK(atomic_fetch_add(&sender->terminals, 1) == 0);
+    CHECK(orbit_call_u64_cancel(
+        &sender->fixture->calls, token) == ORBIT_CALL_STALE);
+    if (terminal == ORBIT_CALL_TERMINAL_CANCELLED)
+        atomic_fetch_add(&sender->cancelled, 1);
+    else if (terminal == ORBIT_CALL_TERMINAL_STOPPED)
+        atomic_fetch_add(&sender->stopped, 1);
+    else
+        CHECK(0 && "unmatched concurrent local terminal");
+}
+
+static void call_race_submit(void *user) {
+    call_race_sender *sender = (call_race_sender *)user;
+    call_race_gate_wait(sender->gate);
+    sender->result = orbit_call_u64_async(
+        &sender->fixture->calls, &sender->producer, 10u,
+        UINT64_C(100) + (uint64_t)sender->ordinal,
+        call_race_terminal, sender, &sender->token, &sender->send);
+}
+
+static void call_race_settle_worker(void *user) {
+    call_race_settle *settle = (call_race_settle *)user;
+    call_race_gate_wait(settle->gate);
+    settle->result = settle->close_port
+        ? orbit_call_port_close(
+              settle->port, ORBIT_CALL_TERMINAL_STOPPED)
+        : orbit_call_u64_cancel(settle->port, settle->token);
+}
+
+static void call_race_sender_init(call_race_sender *sender,
+                                   call_fixture *fixture,
+                                   call_race_gate *gate, unsigned ordinal) {
+    memset(sender, 0, sizeof(*sender));
+    sender->fixture = fixture;
+    sender->gate = gate;
+    sender->ordinal = ordinal;
+    sender->result = ORBIT_CALL_BUSY;
+    sender->send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    atomic_init(&sender->terminals, 0);
+    atomic_init(&sender->cancelled, 0);
+    atomic_init(&sender->stopped, 0);
+    /* Each producer owns its own retained ref until its thread exits.
+     * Never concurrently mutate or release another thread's ref.
+     */
+    CHECK(orbit_service_ref_retain(&fixture->ref, &sender->producer));
+}
+
+static void call_race_start_senders(
+    call_fixture *fixture, call_race_gate *gate,
+    call_race_sender senders[CALL_RACE_SENDERS],
+    cmeta_thread_t threads[CALL_RACE_SENDERS]) {
+    unsigned i;
+    for (i = 0u; i < CALL_RACE_SENDERS; ++i) {
+        call_race_sender_init(&senders[i], fixture, gate, i);
+        CHECK(cmeta_thread_create(
+            &threads[i], call_race_submit, &senders[i]) == 0);
+    }
+}
+
+static void call_race_join_senders(
+    call_race_sender senders[CALL_RACE_SENDERS],
+    cmeta_thread_t threads[CALL_RACE_SENDERS]) {
+    unsigned i;
+    for (i = 0u; i < CALL_RACE_SENDERS; ++i) {
+        CHECK(cmeta_thread_join(&threads[i]) == 0);
+        orbit_service_ref_release(&senders[i].producer);
+    }
+}
+
+/*
+ * Eight real threads contend with no owner progress. Exactly two can hold
+ * the two response credits; rejected calls must retain ownership and
+ * receive no callback. Two other threads cancel those accepted calls while
+ * a third closes the port. Any legal interleaving yields one terminal per
+ * accepted token and no callback for a FULL rejection.
+ */
+static void test_concurrent_producers_and_terminals(void) {
+    call_fixture f;
+    call_race_gate admit_gate, settle_gate;
+    call_race_sender senders[CALL_RACE_SENDERS];
+    cmeta_thread_t submitters[CALL_RACE_SENDERS] = {0};
+    call_race_settle settles[3] = {0};
+    cmeta_thread_t settlers[3] = {0};
+    orbit_call_port_stats stats = {0};
+    uint64_t tokens[2] = {0};
+    unsigned accepted = 0u, full = 0u, i;
+    unsigned terminals = 0u, cancelled = 0u, stopped = 0u;
+
+    fixture_prepare(&f, 2u, 2u);
+    call_race_gate_init(&admit_gate);
+    call_race_start_senders(&f, &admit_gate, senders, submitters);
+    call_race_begin(&admit_gate, CALL_RACE_SENDERS);
+    call_race_join_senders(senders, submitters);
+
+    for (i = 0u; i < CALL_RACE_SENDERS; ++i) {
+        if (senders[i].result == ORBIT_CALL_OK) {
+            CHECK(accepted < 2u);
+            CHECK(senders[i].token != 0u);
+            CHECK(senders[i].send == CFLOW_ACTOR_SEND_ACCEPTED);
+            tokens[accepted++] = senders[i].token;
+        } else {
+            CHECK(senders[i].result == ORBIT_CALL_FULL);
+            CHECK(senders[i].token == 0u);
+            CHECK(senders[i].send == CFLOW_ACTOR_SEND_INVALID_ARGUMENT);
+            ++full;
+        }
+        CHECK(atomic_load(&senders[i].terminals) == 0);
+    }
+    CHECK(accepted == 2u && full == CALL_RACE_SENDERS - 2u);
+    CHECK(tokens[0] != tokens[1]);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.admitted == 2u && stats.rejected_full == full);
+    CHECK(stats.occupied == 2u && stats.admitting == 0u);
+    CHECK(orbit_call_port_try_destroy(&f.calls) == ORBIT_CALL_BUSY);
+
+    call_race_gate_init(&settle_gate);
+    settles[0] = (call_race_settle){
+        &f.calls, &settle_gate, tokens[0], false, ORBIT_CALL_BUSY
+    };
+    settles[1] = (call_race_settle){
+        &f.calls, &settle_gate, tokens[1], false, ORBIT_CALL_BUSY
+    };
+    settles[2] = (call_race_settle){
+        &f.calls, &settle_gate, 0u, true, ORBIT_CALL_BUSY
+    };
+    for (i = 0u; i < 3u; ++i)
+        CHECK(cmeta_thread_create(
+            &settlers[i], call_race_settle_worker, &settles[i]) == 0);
+    call_race_begin(&settle_gate, 3);
+    for (i = 0u; i < 3u; ++i)
+        CHECK(cmeta_thread_join(&settlers[i]) == 0);
+    CHECK(settles[2].result == ORBIT_CALL_OK);
+    CHECK((settles[0].result == ORBIT_CALL_OK ||
+           settles[0].result == ORBIT_CALL_STALE));
+    CHECK((settles[1].result == ORBIT_CALL_OK ||
+           settles[1].result == ORBIT_CALL_STALE));
+
+    for (i = 0u; i < CALL_RACE_SENDERS; ++i) {
+        const int callback_count = atomic_load(&senders[i].terminals);
+        CHECK(callback_count ==
+              (senders[i].result == ORBIT_CALL_OK ? 1 : 0));
+        terminals += (unsigned)callback_count;
+        cancelled += (unsigned)atomic_load(&senders[i].cancelled);
+        stopped += (unsigned)atomic_load(&senders[i].stopped);
+    }
+    CHECK(terminals == 2u && cancelled + stopped == 2u);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.closed && stats.occupied == 0u);
+    CHECK(stats.callbacks_inflight == 0u && stats.admitting == 0u);
+    CHECK(stats.admitted == 2u && stats.cancelled == cancelled &&
+          stats.stopped == stopped);
+    CHECK(orbit_call_u64_cancel(&f.calls, tokens[0]) == ORBIT_CALL_STALE);
+    CHECK(orbit_call_u64_cancel(&f.calls, tokens[1]) == ORBIT_CALL_STALE);
+
+    /* Both CFlow token messages were accepted; after close they are stale,
+     * cannot run the native business method and cannot reissue callbacks.
+     */
+    fixture_drive_until(&f, &f.probe.observed, 2);
+    CHECK(atomic_load(&f.probe.business_executions) == 0);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.admitted == stats.cancelled + stats.stopped);
+    fixture_destroy(&f);
+}
+
+/*
+ * Repeatedly release the same gate for eight producers and one closer.
+ * The port may close before, between or after in-flight admissions.
+ * There is no requirement that any particular call wins; the invariant is
+ * accepted == callback count, rejected == no callback, no residual credits.
+ */
+static void test_concurrent_close_during_admission(void) {
+    unsigned round;
+    for (round = 0u; round < CALL_RACE_ROUNDS; ++round) {
+        call_fixture f;
+        call_race_gate gate;
+        call_race_sender senders[CALL_RACE_SENDERS];
+        cmeta_thread_t submitters[CALL_RACE_SENDERS] = {0};
+        call_race_settle closer = {0};
+        cmeta_thread_t closer_thread = NULL;
+        orbit_call_port_stats stats = {0};
+        unsigned i, accepted = 0u, full = 0u, closed = 0u;
+
+        fixture_prepare(&f, 2u, 2u);
+        call_race_gate_init(&gate);
+        call_race_start_senders(&f, &gate, senders, submitters);
+        closer = (call_race_settle){
+            &f.calls, &gate, 0u, true, ORBIT_CALL_BUSY
+        };
+        CHECK(cmeta_thread_create(
+            &closer_thread, call_race_settle_worker, &closer) == 0);
+        call_race_begin(&gate, CALL_RACE_SENDERS + 1);
+        call_race_join_senders(senders, submitters);
+        CHECK(cmeta_thread_join(&closer_thread) == 0);
+        CHECK(closer.result == ORBIT_CALL_OK);
+
+        for (i = 0u; i < CALL_RACE_SENDERS; ++i) {
+            const call_race_sender *sender = &senders[i];
+            const int callback_count = atomic_load(&sender->terminals);
+            if (sender->result == ORBIT_CALL_OK) {
+                ++accepted;
+                CHECK(sender->send == CFLOW_ACTOR_SEND_ACCEPTED);
+                CHECK(sender->token != 0u && callback_count == 1);
+                CHECK(atomic_load(&sender->stopped) == 1);
+            } else {
+                CHECK(sender->result == ORBIT_CALL_FULL ||
+                      sender->result == ORBIT_CALL_CLOSED);
+                CHECK(sender->token == 0u && callback_count == 0);
+                if (sender->result == ORBIT_CALL_FULL) ++full;
+                else ++closed;
+            }
+        }
+        CHECK(accepted <= 2u);
+        CHECK(accepted + full + closed == CALL_RACE_SENDERS);
+        CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+        CHECK(stats.closed && stats.occupied == 0u);
+        CHECK(stats.callbacks_inflight == 0u && stats.admitting == 0u);
+        CHECK(stats.admitted == accepted &&
+              stats.stopped == accepted && stats.cancelled == 0u);
+        CHECK(stats.rejected_full == full);
+        CHECK(orbit_call_port_try_destroy(&f.calls) == ORBIT_CALL_BUSY);
+
+        /* No owner action or post-commit dispatch ran before close. */
+        CHECK(atomic_load(&f.probe.business_executions) == 0);
+        fixture_destroy(&f);
+    }
+}
+
 int main(void) {
     test_mailbox_rejection_and_postcommit();
     test_cancel_credit_reuse();
@@ -701,5 +997,7 @@ int main(void) {
     test_terminal_callback_holds_credit();
     test_foreign_actor_and_catalog_rejected();
     test_two_method_owner_dispatch();
+    test_concurrent_producers_and_terminals();
+    test_concurrent_close_during_admission();
     return 0;
 }
