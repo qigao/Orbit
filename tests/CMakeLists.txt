@@ -93,8 +93,10 @@ if(ORBIT_IDL_CONFORMANCE)
   add_executable(orbit_generated_idl_native_test
     test_orbit_generated_idl.c "${_orbit_idl_header}" "${_orbit_idl_records}")
   target_compile_features(orbit_generated_idl_native_test PRIVATE c_std_11)
+  # Host SDK serves only the external generator PROCESS. Never admit its
+  # Salts2.3 headers into the Salts3 Orbit runtime compilation.
   target_include_directories(orbit_generated_idl_native_test PRIVATE
-    "${_orbit_idl_dir}" "${ORBIT_IDL_SDK_ROOT}/utils/include")
+    "${_orbit_idl_dir}")
   target_link_libraries(orbit_generated_idl_native_test
     PRIVATE Orbit::Core Salts::Platform)
   add_test(NAME orbit.idl.generated_unary
