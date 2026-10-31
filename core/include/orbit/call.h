@@ -139,6 +139,16 @@ orbit_call_status orbit_call_u64_async(
  * Cancelled/reused tokens return STALE; all operations copy scalars under
  * the port mutex and never return raw borrowed slot storage.
  */
+/*
+ * Single-owner post-commit routing query for a valid generation token.
+ * Returns the exact admitted method ID without exposing or borrowing the
+ * slot. This is NOT a request/response read or an execution authorization;
+ * only call it from the CFlow post-commit observation path. A cancelled,
+ * closed or recycled slot reports STALE and never modifies out_method.
+ */
+orbit_call_status orbit_call_u64_method(
+    orbit_call_port *port, uint64_t token, orbit_method_id *out_method);
+
 orbit_call_status orbit_call_u64_request(
     orbit_call_port *port, uint64_t token,
     orbit_method_id expected_method, uint64_t *out_request);
@@ -171,6 +181,14 @@ orbit_call_status orbit_call_u64_cancel(orbit_call_port *port, uint64_t token);
  */
 orbit_call_status orbit_call_port_close(
     orbit_call_port *port, orbit_call_terminal reason);
+
+/*
+ * Startup-time owner check for the optional Orbit::ACE lifetime guard.
+ * The caller must serialize this query with Service/port destroy. No
+ * copy of CFlow's private control block or new ownership authority.
+ */
+bool orbit_call_port_is_bound_to(
+    const orbit_call_port *port, const orbit_service *service);
 
 bool orbit_call_port_get_stats(
     const orbit_call_port *port, orbit_call_port_stats *out);

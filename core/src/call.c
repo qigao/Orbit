@@ -349,6 +349,24 @@ orbit_call_status orbit_call_u64_async(
     return ORBIT_CALL_OK;
 }
 
+orbit_call_status orbit_call_u64_method(
+    orbit_call_port *port, uint64_t token, orbit_method_id *out_method) {
+    orbit_call_impl *impl = orbit_call_live(port);
+    orbit_call_slot *slot;
+    if (impl == NULL || token == 0u || out_method == NULL)
+        return ORBIT_CALL_INVALID_ARGUMENT;
+    cmeta_mutex_lock(&impl->mutex);
+    slot = orbit_call_lookup_locked(impl, token);
+    if (slot == NULL || impl->closed || slot->cancel_requested ||
+        slot->observed) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_STALE;
+    }
+    *out_method = slot->method;
+    cmeta_mutex_unlock(&impl->mutex);
+    return ORBIT_CALL_OK;
+}
+
 orbit_call_status orbit_call_u64_request(
     orbit_call_port *port, uint64_t token,
     orbit_method_id expected_method, uint64_t *out_request) {
@@ -493,6 +511,16 @@ orbit_call_status orbit_call_port_close(
     --impl->closing_calls;
     cmeta_mutex_unlock(&impl->mutex);
     return ORBIT_CALL_OK;
+}
+
+bool orbit_call_port_is_bound_to(
+    const orbit_call_port *port, const orbit_service *service) {
+    orbit_call_impl *impl = orbit_call_live(port);
+    return impl != NULL && service != NULL &&
+        impl->owner == service &&
+        impl->actor_identity == service->actor.impl &&
+        impl->methods == service->methods &&
+        impl->method_count == service->method_count;
 }
 
 bool orbit_call_port_get_stats(const orbit_call_port *port,

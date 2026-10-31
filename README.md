@@ -71,6 +71,23 @@ The current first implementation slice lives under `core/` and uses
 
 The native test `orbit.core.native` uses the existing CFlow Machine Actor
 and owner Executor/Scheduler. No new runtime worker, mailbox, transport or
-CI probe has been added. These sources do not yet support unary call/reply or
-IDL generation and must not be merged/released based solely on the tests'
-existence.
+CI probe has been added. The M0b stacked branch also contains an experimental,
+**u64/u64-only**, fixed-credit `Orbit::Call` terminal protocol. Neither
+implementation is compiled/CI-qualified against an installed Salts 3 SDK.
+
+### Optional M0c ServiceHost generation protection (Draft)
+
+`-DORBIT_BUILD_ACE=ON` explicitly adds `Orbit::ACE`, linked to the original
+`Salts::ServiceHost` for address-stable Scope acquisition and N -> N+1
+generation lifetime fencing. The default is **OFF**: `Orbit::Core` stays
+a CFlow-only native runtime adapter. See
+[ServiceHost Scope admission](docs/M0_SCOPE_ADMISSION.md).
+
+All current feature PRs remain Draft:
+[#10 local CFlow Service](https://github.com/qigao/Orbit/pull/10),
+[#11 bounded CallPort](https://github.com/qigao/Orbit/pull/11),
+[#12 native ServiceHost Scope guard](https://github.com/qigao/Orbit/pull/12).
+No generated IDL Service client, general-purpose managed request/reply
+shape, H2 Streaming or Directory is admitted yet. Exact SDK build/CTest and
+real Provider/Plugin unload acceptance remain blocked by
+[Issue #13](https://github.com/qigao/Orbit/issues/13).

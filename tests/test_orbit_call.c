@@ -51,9 +51,9 @@ typedef struct call_fixture {
     orbit_service service;
     orbit_service_ref ref;
     orbit_call_port calls;
-    cflow_machine_action_binding action;
+    cflow_machine_action_binding action[2];
     cflow_actor_config actor_config;
-    orbit_service_method methods[1];
+    orbit_service_method methods[2];
     orbit_service_config service_config;
     int state;
     call_probe probe;
@@ -109,18 +109,32 @@ static bool call_observe(void *user, const cmeta_type_desc *type,
      * Dispatching here is deliberately separate from the deterministic
      * Machine Action; it may produce application side effects and errors.
      */
-    status = orbit_call_u64_request(&fixture->calls, token, 10u, &request);
-    if (status == ORBIT_CALL_OK) {
-        atomic_fetch_add(&fixture->probe.business_executions, 1);
-        if (request != 12345u) {
-            status = orbit_call_u64_stage_reply(
-                &fixture->calls, token, 10u,
-                request == 999u ? 17 : 0, request + 1u);
-            CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
+    {
+        orbit_method_id actual_method = 0u;
+        status = orbit_call_u64_method(
+            &fixture->calls, token, &actual_method);
+        if (status == ORBIT_CALL_OK) {
+            CHECK(actual_method == 10u || actual_method == 20u);
+            status = orbit_call_u64_request(
+                &fixture->calls, token, actual_method, &request);
+            if (status == ORBIT_CALL_OK) {
+                atomic_fetch_add(&fixture->probe.business_executions, 1);
+                if (request != 12345u) {
+                    const uint64_t response = request +
+                        (actual_method == 10u ? 1u : 100u);
+                    status = orbit_call_u64_stage_reply(
+                        &fixture->calls, token, actual_method,
+                        request == 999u ? 17 : 0, response);
+                    CHECK(status == ORBIT_CALL_OK ||
+                          status == ORBIT_CALL_STALE);
+                }
+            }
         }
-    } else {
-        CHECK(status == ORBIT_CALL_STALE);
-        atomic_fetch_add(&fixture->probe.skipped_cancelled, 1);
+        if (status == ORBIT_CALL_STALE) {
+            atomic_fetch_add(&fixture->probe.skipped_cancelled, 1);
+        } else {
+            CHECK(status == ORBIT_CALL_OK);
+        }
     }
     status = orbit_call_u64_observe(&fixture->calls, token);
     CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
@@ -197,20 +211,26 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
         {10u, &cmeta_type_int, CFLOW_MACHINE_STATE_ACTIVE}
     };
     const cflow_event_type events[] = {
-        {100u, &cmeta_type_uint64}
+        {100u, &cmeta_type_uint64},
+        {101u, &cmeta_type_uint64}
     };
     const cflow_machine_action actions[] = {
         {300u, &cmeta_type_int, 100u, &cmeta_type_uint64,
          &cmeta_type_int, CMETA_EFFECT_STATEFUL,
          CMETA_PROP_DETERMINISTIC | CMETA_PROP_NO_ALIAS,
+         CFLOW_MACHINE_ACTION_VALUE, &cmeta_type_uint64, 0u},
+        {301u, &cmeta_type_int, 101u, &cmeta_type_uint64,
+         &cmeta_type_int, CMETA_EFFECT_STATEFUL,
+         CMETA_PROP_DETERMINISTIC | CMETA_PROP_NO_ALIAS,
          CFLOW_MACHINE_ACTION_VALUE, &cmeta_type_uint64, 0u}
     };
     const cflow_machine_transition transitions[] = {
-        {10u, 100u, 0u, 300u, 10u, 1u}
+        {10u, 100u, 0u, 300u, 10u, 1u},
+        {10u, 101u, 0u, 301u, 10u, 1u}
     };
     const cflow_machine_definition definition = {
-        states, 1u, 10u, events, 1u, NULL, 0u,
-        actions, 1u, transitions, 1u
+        states, 1u, 10u, events, 2u, NULL, 0u,
+        actions, 2u, transitions, 2u
     };
     memset(fixture, 0, sizeof(*fixture));
     fixture->probe.port = &fixture->calls;
@@ -242,12 +262,15 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
     CHECK(cflow_scheduler_owner_bind(
         &fixture->scheduler, &fixture->executor, 32u));
 
-    fixture->action = (cflow_machine_action_binding){
+    fixture->action[0] = (cflow_machine_action_binding){
         300u, call_action, fixture
+    };
+    fixture->action[1] = (cflow_machine_action_binding){
+        301u, call_action, fixture
     };
     fixture->actor_config.machine = (cflow_machine_instance_config){
         &fixture->machine, &fixture->state, &cmeta_type_uint64,
-        NULL, 0u, &fixture->action, 1u,
+        NULL, 0u, fixture->action, 2u,
         mailbox_capacity, &fixture->executor
     };
     fixture->actor_config.scheduler = &fixture->scheduler;
@@ -257,8 +280,11 @@ static void fixture_prepare(call_fixture *fixture, size_t mailbox_capacity,
     fixture->methods[0] = (orbit_service_method){
         10u, 100u, &cmeta_type_uint64, ORBIT_METHOD_CALL_TOKEN
     };
+    fixture->methods[1] = (orbit_service_method){
+        20u, 101u, &cmeta_type_uint64, ORBIT_METHOD_CALL_TOKEN
+    };
     fixture->service_config = (orbit_service_config){
-        &fixture->actor_config, fixture->methods, 1u
+        &fixture->actor_config, fixture->methods, 2u
     };
     CHECK(orbit_service_spawn(&fixture->service, &fixture->service_config)
           .status == ORBIT_SERVICE_OK);
@@ -314,6 +340,14 @@ static void test_mailbox_rejection_and_postcommit(void) {
     CHECK(token != 0u && send_status == CFLOW_ACTOR_SEND_ACCEPTED);
     CHECK(atomic_load(&f.probe.callback_count) == 0);
     {
+        orbit_method_id actual = 0u;
+        CHECK(orbit_call_u64_method(&f.calls, token, &actual) ==
+              ORBIT_CALL_OK);
+        CHECK(actual == 10u);
+        CHECK(orbit_call_u64_method(&f.calls, token, NULL) ==
+              ORBIT_CALL_INVALID_ARGUMENT);
+    }
+    {
         uint64_t probe_request = 0u;
         CHECK(orbit_call_u64_request(
             &f.calls, token, 20u, &probe_request) == ORBIT_CALL_TYPE_MISMATCH);
@@ -333,6 +367,12 @@ static void test_mailbox_rejection_and_postcommit(void) {
     fixture_drive_until(&f, &f.probe.successes, 1);
     CHECK(atomic_load(&f.probe.callback_count) == 1);
     CHECK(atomic_load(&f.probe.latest_response) == 42u);
+    {
+        orbit_method_id unchanged = UINT64_C(987);
+        CHECK(orbit_call_u64_method(&f.calls, token, &unchanged) ==
+              ORBIT_CALL_STALE);
+        CHECK(unchanged == UINT64_C(987));
+    }
     CHECK(atomic_load(&f.probe.action_executions) == 1);
     CHECK(atomic_load(&f.probe.business_executions) == 1);
     CHECK(orbit_call_u64_observe(&f.calls, token) == ORBIT_CALL_STALE);
@@ -588,6 +628,9 @@ static void test_foreign_actor_and_catalog_rejected(void) {
 
     fixture_prepare(&first, 2u, 2u);
     fixture_prepare(&second, 2u, 2u);
+    CHECK(orbit_call_port_is_bound_to(&first.calls, &first.service));
+    CHECK(!orbit_call_port_is_bound_to(&first.calls, &second.service));
+    CHECK(orbit_call_port_is_bound_to(&second.calls, &second.service));
 
     CHECK(orbit_call_u64_async(
         &first.calls, &second.ref, 10u, 55u, call_terminal,
@@ -610,6 +653,46 @@ static void test_foreign_actor_and_catalog_rejected(void) {
     fixture_destroy(&first);
 }
 
+/* Two different Service method IDs share the one real CFlow Actor,
+ * but the post-commit observer retrieves the exact recorded method identity
+ * from the generation-checked token. This is the runtime contract consumed
+ * by the generated `salts-idlc` Service dispatcher.
+ */
+static void test_two_method_owner_dispatch(void) {
+    call_fixture f;
+    uint64_t first = 0u;
+    uint64_t second = 0u;
+    orbit_method_id id = 0u;
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    orbit_call_port_stats stats = {0};
+    fixture_prepare(&f, 2u, 2u);
+
+    CHECK(orbit_call_u64_async(
+        &f.calls, &f.ref, 10u, 5u, call_terminal,
+        &f.probe, &first, &send) == ORBIT_CALL_OK);
+    CHECK(send == CFLOW_ACTOR_SEND_ACCEPTED);
+    CHECK(orbit_call_u64_async(
+        &f.calls, &f.ref, 20u, 7u, call_terminal,
+        &f.probe, &second, &send) == ORBIT_CALL_OK);
+    CHECK(send == CFLOW_ACTOR_SEND_ACCEPTED);
+    CHECK(first != 0u && second != 0u && first != second);
+    CHECK(orbit_call_u64_method(&f.calls, first, &id) == ORBIT_CALL_OK);
+    CHECK(id == 10u);
+    CHECK(orbit_call_u64_method(&f.calls, second, &id) == ORBIT_CALL_OK);
+    CHECK(id == 20u);
+    CHECK(orbit_call_u64_request(
+        &f.calls, second, 10u, &id) == ORBIT_CALL_TYPE_MISMATCH);
+
+    fixture_drive_until(&f, &f.probe.successes, 2);
+    CHECK(atomic_load(&f.probe.observed) == 2);
+    CHECK(atomic_load(&f.probe.business_executions) == 2);
+    CHECK(atomic_load(&f.probe.latest_response) == 107u);
+    CHECK(orbit_call_u64_method(&f.calls, first, &id) == ORBIT_CALL_STALE);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.completed_success == 2u && stats.occupied == 0u);
+    fixture_destroy(&f);
+}
+
 int main(void) {
     test_mailbox_rejection_and_postcommit();
     test_cancel_credit_reuse();
@@ -617,5 +700,6 @@ int main(void) {
     test_cancel_during_real_actor_action();
     test_terminal_callback_holds_credit();
     test_foreign_actor_and_catalog_rejected();
+    test_two_method_owner_dispatch();
     return 0;
 }
