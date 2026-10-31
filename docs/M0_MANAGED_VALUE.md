@@ -329,3 +329,42 @@ This extension does not add a parser, generated function ABI, Actor,
 ServiceHost replacement, second CTest executable, CI workflow, package
 probe or installer/consumer application. **Draft until current exact-head
 native Linux/Windows CI runs.**
+
+
+## M0k.2i full-source LLVM ThreadSanitizer admission
+
+The existing native Linux Clang CI job now rebuilds the exact immutable
+SaltsCore 0.1 and CMeta 4.0 sources with the same ThreadSanitizer
+instrumentation used by CMeta's original sanitizer workflow:
+fsanitize=thread, frame pointers, debug symbols, and O1.
+Orbit itself (C11 Core, C11 ACE, generated C11/C++17 tests and the
+actual original N/N+1 Provider DSOs) is compiled and linked using the
+same Clang TSan flags against these instrumented installed dependencies.
+
+No new workflow, CI job, test executable, consumer project, simulator,
+alternate Actor/Plugin runtime or CMake detection is added. This
+source-instrumented admission uses the same native CI's preexisting
+salts-idlc host provenance-pinned external CLI; its old standalone
+host SDK is not injected into the CMeta/Orbit application.
+
+The original native CTest graph runs under TSAN_OPTIONS with
+halt_on_error=1 and exitcode=66, including native CallPort
+multi-producer/admission/cancel/close, Provider copy/restore/close
+reentrancy, generated owning VALUE Room and real Plugin N/N+1 DSO
+Scope/busy/drain/unload. A failure must be reported as a real RED,
+not suppressed, reduced to a single mock test or counted as success
+from an earlier compiler/source epoch.
+
+Safety policy for CMeta restore_zero failure is deliberately fail-stop:
+after the slot has transitioned to RECLAIMING, both independent
+request and response Provider restore hooks are attempted. If either
+fails, the process aborts without transitioning that generation
+to FREE. This is not a recoverable failed operation; retrying or
+publishing a partially freed response would violate owning CMeta
+VALUE semantics. Full recoverable cleanup would require an explicit
+separate provider ABI and fault model, not a local error alias.
+
+One successful TSan run is a sampled dynamic race check of the actual
+instrumented source, not a formal proof of every scheduler interleaving.
+Unsupported nested/nullable/collection VALUE, remote HTTP/2 Streaming
+and durable business COMMIT/ACK remain separate admission gates.
