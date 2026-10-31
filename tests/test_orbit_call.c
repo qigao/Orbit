@@ -346,16 +346,16 @@ static bool call_owned_observe(void *user, const cmeta_type_desc *type,
     }
     {
         const test_owned_bytes *request = (const test_owned_bytes *)borrowed;
-        CHECK(test_owned_bytes_size(request) == sizeof(expected));
-        CHECK(memcmp(test_owned_bytes_data((test_owned_bytes *)request),
+        CHECK(request->size == sizeof(expected));
+        CHECK(memcmp(((const test_owned_bytes *)request)->data,
                      expected, sizeof(expected)) == 0);
     }
-    CHECK(test_owned_bytes_from(
+    CHECK(test_owned_from(
         &reply, expected, sizeof(expected), 32u));
     status = orbit_call_value_stage_reply(
         &f->calls, token, 10u, 0, &reply);
     CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
-    test_owned_bytes_destroy(&reply); /* application still owns the reply */
+    test_owned_destroy(&reply); /* application still owns the reply */
     CHECK(orbit_call_value_end(&f->calls, token, 10u) == ORBIT_CALL_OK);
     status = orbit_call_value_observe(&f->calls, token);
     CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
@@ -376,8 +376,8 @@ static void call_owned_terminal(
     atomic_fetch_add(&p->callback_count, 1);
     if (outcome == ORBIT_CALL_TERMINAL_SUCCESS) {
         const test_owned_bytes *bytes = (const test_owned_bytes *)response;
-        CHECK(bytes != NULL && test_owned_bytes_size(bytes) == sizeof(expected));
-        CHECK(memcmp(test_owned_bytes_data((test_owned_bytes *)bytes),
+        CHECK(bytes != NULL && bytes->size == sizeof(expected));
+        CHECK(memcmp(((const test_owned_bytes *)bytes)->data,
                      expected, sizeof(expected)) == 0);
         atomic_fetch_add(&p->successes, 1);
     } else if (outcome == ORBIT_CALL_TERMINAL_CANCELLED) {
@@ -1209,7 +1209,7 @@ static void test_owned_value_deepcopy_and_capacity(void) {
     cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
 
     fixture_prepare_ex(&f, 2u, 1u, true);
-    CHECK(test_owned_bytes_from(&source, raw, sizeof(raw), 32u));
+    CHECK(test_owned_from(&source, raw, sizeof(raw), 32u));
     CHECK(orbit_call_value_async(
         &f.calls, &f.ref, 10u, &source,
         call_owned_terminal, &f.probe, &token, &send) == ORBIT_CALL_OK);
@@ -1226,8 +1226,8 @@ static void test_owned_value_deepcopy_and_capacity(void) {
     CHECK(orbit_call_port_get_stats(&f.calls, &stats));
     CHECK(stats.occupied == 1u && stats.rejected_full == 1u);
     /* In-place mutation cannot change the Port-owned deep clone. */
-    test_owned_bytes_data(&source)[1] = 0x11u;
-    test_owned_bytes_destroy(&source);
+    source.data[1] = 0x11u;
+    test_owned_destroy(&source);
     fixture_drive_until(&f, &f.probe.successes, 1);
     CHECK(atomic_load(&f.probe.business_executions) == 1);
     CHECK(atomic_load(&f.probe.callback_count) == 1);
@@ -1241,13 +1241,13 @@ static void test_owned_value_deepcopy_and_capacity(void) {
         CHECK(expired_request == NULL);
     }
 
-    CHECK(test_owned_bytes_resize(&oversize, 33u));
+    CHECK(test_owned_resize(&oversize, 33u));
     CHECK(orbit_call_value_async(
         &f.calls, &f.ref, 10u, &oversize,
         call_owned_terminal, &f.probe,
         &rejected, &send) == ORBIT_CALL_VALUE_TOO_LARGE);
     CHECK(rejected == 0u && atomic_load(&f.probe.callback_count) == 1);
-    test_owned_bytes_destroy(&oversize);
+    test_owned_destroy(&oversize);
     fixture_destroy(&f);
 }
 
@@ -1276,12 +1276,12 @@ static void cancel_while_owned_request_borrowed(void *user) {
     CHECK(orbit_call_port_get_stats(&f->calls, &stats));
     CHECK(stats.executing == 1u && stats.occupied == 1u);
     CHECK(stats.callbacks_inflight == 0u && stats.cancelled == 1u);
-    CHECK(test_owned_bytes_from(&input, raw, sizeof(raw), 32u));
+    CHECK(test_owned_from(&input, raw, sizeof(raw), 32u));
     atomic_store(&ctx->full_result, (int)orbit_call_value_async(
         &f->calls, &f->ref, 10u, &input, call_owned_terminal, &f->probe,
         &rejected, &send));
     CHECK(rejected == 0u);
-    test_owned_bytes_destroy(&input);
+    test_owned_destroy(&input);
     atomic_store(&f->probe.release_owned_business, true);
 }
 
@@ -1301,12 +1301,12 @@ static void test_owned_execution_cancel_keeps_request(void) {
 
     fixture_prepare_ex(&f, 2u, 1u, true);
     atomic_store(&f.probe.hold_owned_business, true);
-    CHECK(test_owned_bytes_from(&input, raw, sizeof(raw), 32u));
+    CHECK(test_owned_from(&input, raw, sizeof(raw), 32u));
     CHECK(orbit_call_value_async(
         &f.calls, &f.ref, 10u, &input,
         call_owned_terminal, &f.probe, &token, &send) == ORBIT_CALL_OK);
     CHECK(send == CFLOW_ACTOR_SEND_ACCEPTED);
-    test_owned_bytes_destroy(&input);
+    test_owned_destroy(&input);
     ctx.fixture = &f;
     ctx.token = token;
     atomic_init(&ctx.result, ORBIT_CALL_BUSY);
@@ -1328,11 +1328,11 @@ static void test_owned_execution_cancel_keeps_request(void) {
 
     /* Reuse is legal only AFTER the owned request execution borrow exits. */
     atomic_store(&f.probe.hold_owned_business, false);
-    CHECK(test_owned_bytes_from(&input, raw, sizeof(raw), 32u));
+    CHECK(test_owned_from(&input, raw, sizeof(raw), 32u));
     CHECK(orbit_call_value_async(
         &f.calls, &f.ref, 10u, &input,
         call_owned_terminal, &f.probe, &token, &send) == ORBIT_CALL_OK);
-    test_owned_bytes_destroy(&input);
+    test_owned_destroy(&input);
     fixture_drive_until(&f, &f.probe.successes, 1);
     CHECK(atomic_load(&f.probe.callback_count) == 2);
     CHECK(orbit_call_port_get_stats(&f.calls, &stats));
