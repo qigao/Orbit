@@ -13,6 +13,7 @@
 
 #define DATABIND_NATIVE_ENABLE_ORBIT 1
 #include "game.service_native.h"
+#include "owned_room.service_native.h"
 
 #include <stdatomic.h>
 #include <stdint.h>
@@ -420,6 +421,442 @@ static void dso_cancel_during_live_business(void *user) {
     atomic_store(&probe->actor->receiver.release_business, true);
 }
 
+
+/*
+ * M0k.2c: the very same native Context-v1 owning VALUE generated Client and
+ * Dispatcher used by the real CFlow Room must also invoke actual old-N /
+ * new-N Plugin DSO vtables. This is an additional accepted scenario in
+ * orbit.ace.dso_native, not a second runtime, Plugin loader or CTest target.
+ *
+ * The scalar M0i/M0j acceptance runs and fully retires FIRST, so this
+ * separate real ServiceHost instance cannot mask their original BUSY proofs.
+ */
+typedef struct dso_owned_receiver {
+    orbit_dso_value projected;
+    uint8_t marker;
+    unsigned invocations;
+    atomic_bool hold_before_provider;
+    atomic_bool native_entered;
+    atomic_bool release_native;
+} dso_owned_receiver;
+
+int databind_9_OwnedGame_4_Room_4_Echo(
+    void *receiver, const OwnedPacket *request, OwnedPacket *response) {
+    dso_owned_receiver *room = (dso_owned_receiver *)receiver;
+    static const unsigned char expected[] = {0u, 0xffu, 0x42u, 0x80u};
+    size_t spins = 0u;
+    int provider_value;
+    if (!room || !request || !response)
+        return 17;
+    if (atomic_load(&room->hold_before_provider)) {
+        atomic_store(&room->native_entered, true);
+        while (!atomic_load(&room->release_native) &&
+               spins++ < 10000u)
+            cmeta_sleep_ms(1u);
+        CHECK(atomic_load(&room->release_native));
+    }
+    /* These bytes are Port-owned, even when a racing local CANCELLED
+     * terminal callback has already returned to another native thread.
+     */
+    CHECK(request->label.data != NULL && request->label.size == 6u);
+    CHECK(memcmp(request->label.data, "Room-A", 6u) == 0);
+    CHECK(request->payload.data != NULL &&
+          request->payload.size == sizeof(expected));
+    CHECK(memcmp(request->payload.data, expected,
+                 sizeof(expected)) == 0);
+
+    provider_value = orbit_dso_value_get(&room->projected);
+    CHECK(provider_value == (int)room->marker); /* actual old/next DSO vtable */
+    if (OwnedPacket_clone(response, request) != 0)
+        return 18;
+    response->payload.data[0] = (unsigned char)provider_value;
+    ++room->invocations;
+    return 0;
+}
+
+typedef struct dso_owned_actor {
+    cflow_machine machine;
+    cflow_executor executor;
+    cflow_scheduler scheduler;
+    orbit_service service;
+    orbit_service_ref producer;
+    orbit_call_port port;
+    cflow_machine_action_binding action[1];
+    dso_owned_receiver receiver;
+    databind_9_OwnedGame_4_Room_4_Echo__orbit_value_owner value_owner;
+    databind_9_OwnedGame_4_Room_4_Echo__orbit_context context;
+    databind_9_OwnedGame_4_Room_4_Echo__orbit_context rejected_context;
+    databind_9_OwnedGame_4_Room__orbit_binding binding;
+    int state;
+    unsigned observed;
+    unsigned successes;
+    unsigned cancelled;
+    unsigned errors;
+    uint8_t last_marker;
+} dso_owned_actor;
+
+static bool dso_owned_observe(
+    void *user, const cmeta_type_desc *type, const void *value) {
+    dso_owned_actor *actor = (dso_owned_actor *)user;
+    orbit_call_status status;
+    CHECK(actor != NULL && value != NULL);
+    CHECK(cmeta_type_equal(type, &cmeta_type_uint64));
+    status = databind_9_OwnedGame_4_Room__orbit_dispatch(
+        &actor->binding, *(const uint64_t *)value);
+    CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
+    ++actor->observed;
+    return true;
+}
+
+static void dso_owned_on_error(void *user, const char *message) {
+    dso_owned_actor *actor = (dso_owned_actor *)user;
+    (void)message;
+    ++actor->errors;
+    CHECK(orbit_call_port_close(
+        &actor->port, ORBIT_CALL_TERMINAL_ACTOR_FAILED) == ORBIT_CALL_OK);
+}
+
+static void dso_owned_on_done(void *user) {
+    dso_owned_actor *actor = (dso_owned_actor *)user;
+    CHECK(orbit_call_port_close(
+        &actor->port, ORBIT_CALL_TERMINAL_STOPPED) == ORBIT_CALL_OK);
+}
+
+static void dso_owned_done(
+    void *user, uint64_t token, orbit_call_terminal terminal,
+    int application_status, const OwnedPacket *response) {
+    dso_owned_actor *actor = (dso_owned_actor *)user;
+    static const unsigned char suffix[] = {0xffu, 0x42u, 0x80u};
+    orbit_call_port_stats stats = {0};
+    CHECK(actor != NULL && token != 0u && application_status == 0);
+    CHECK(orbit_call_u64_cancel(&actor->port, token) == ORBIT_CALL_STALE);
+    CHECK(orbit_call_port_get_stats(&actor->port, &stats));
+    CHECK(stats.callbacks_inflight == 1u);
+    if (terminal == ORBIT_CALL_TERMINAL_CANCELLED) {
+        CHECK(response == NULL && stats.executing == 1u);
+        ++actor->cancelled;
+    } else {
+        CHECK(terminal == ORBIT_CALL_TERMINAL_SUCCESS && response != NULL);
+        CHECK(response->label.size == 6u && response->label.data != NULL);
+        CHECK(memcmp(response->label.data, "Room-A", 6u) == 0);
+        CHECK(response->payload.size == 4u && response->payload.data != NULL);
+        CHECK(response->payload.data[0] == actor->receiver.marker);
+        CHECK(memcmp(response->payload.data + 1u, suffix, sizeof(suffix)) == 0);
+        actor->last_marker = response->payload.data[0];
+        ++actor->successes;
+    }
+}
+
+static void dso_owned_actor_start(
+    dso_owned_actor *actor, orbit_ace_scope_guard *scope, uint8_t marker) {
+    const cflow_machine_state states[] = {
+        {1u, &cmeta_type_int, CFLOW_MACHINE_STATE_ACTIVE}
+    };
+    const cflow_event_type events[] = {
+        {100u, &cmeta_type_uint64}
+    };
+    const cflow_machine_action actions[] = {
+        {300u, &cmeta_type_int, 100u, &cmeta_type_uint64,
+         &cmeta_type_int, CMETA_EFFECT_STATEFUL,
+         CMETA_PROP_DETERMINISTIC | CMETA_PROP_NO_ALIAS,
+         CFLOW_MACHINE_ACTION_VALUE, &cmeta_type_uint64, 0u}
+    };
+    const cflow_machine_transition transitions[] = {
+        {1u, 100u, 0u, 300u, 1u, 1u}
+    };
+    const cflow_machine_definition definition = {
+        states, 1u, 1u, events, 1u, NULL, 0u,
+        actions, 1u, transitions, 1u
+    };
+    cflow_actor_config config = {0};
+    orbit_service_config service_config;
+    salts_configurator_service provider;
+    orbit_dso_value view = orbit_dso_value_bind(NULL, NULL);
+    memset(actor, 0, sizeof(*actor));
+    actor->receiver.marker = marker;
+    atomic_init(&actor->receiver.hold_before_provider, false);
+    atomic_init(&actor->receiver.native_entered, false);
+    atomic_init(&actor->receiver.release_native, false);
+    CHECK(cflow_machine_build(&actor->machine, &definition) == CFLOW_MACHINE_OK);
+    CHECK(cflow_executor_owner_init_with_capacity(
+        &actor->executor, 64u, NULL, NULL));
+    CHECK(cflow_scheduler_owner_bind(&actor->scheduler, &actor->executor, 32u));
+    actor->action[0] = (cflow_machine_action_binding){
+        300u, dso_machine_action, NULL
+    };
+    config.machine = (cflow_machine_instance_config){
+        &actor->machine, &actor->state, &cmeta_type_uint64,
+        NULL, 0u, actor->action, 1u, 1u, &actor->executor
+    };
+    config.scheduler = &actor->scheduler;
+    config.callbacks = (cflow_subscriber_callbacks){
+        dso_owned_observe, dso_owned_on_error, dso_owned_on_done, actor
+    };
+    service_config =
+        databind_9_OwnedGame_4_Room__orbit_service_config(&config);
+    CHECK(service_config.method_count == 1u);
+    CHECK(orbit_service_spawn(&actor->service, &service_config).status ==
+          ORBIT_SERVICE_OK);
+    CHECK(databind_9_OwnedGame_4_Room_4_Echo__orbit_port_init_value(
+        &actor->port, &actor->service, 1u, &actor->value_owner) ==
+          ORBIT_CALL_OK);
+    CHECK(orbit_service_ref_acquire(&actor->service, &actor->producer));
+
+    CHECK(orbit_ace_scope_guard_find_service(
+        scope, orbit_dso_value_interface(), &provider) ==
+          SALTS_SERVICE_HOST_OK);
+    CHECK(orbit_dso_value_borrow_from_object(
+        provider.object, provider.interfaces, &view) == CMETA_OK);
+    actor->receiver.projected = view;
+    CHECK(databind_9_OwnedGame_4_Room__orbit_bind(
+        &actor->binding, &actor->port, &actor->receiver));
+    CHECK(orbit_ace_scope_guard_bind(
+        scope, &actor->service, &actor->port) == ORBIT_ACE_SCOPE_OK);
+}
+
+static void dso_owned_actor_run_until(
+    dso_owned_actor *actor, unsigned observed) {
+    unsigned rounds = 0u;
+    while (actor->observed < observed && rounds++ < 2048u)
+        (void)cflow_executor_run_one(&actor->executor);
+    CHECK(actor->observed == observed);
+    CHECK(actor->errors == 0u);
+}
+
+static void dso_owned_actor_stop(dso_owned_actor *actor) {
+    unsigned rounds = 0u;
+    cflow_actor_status status =
+        orbit_service_request_stop(&actor->service);
+    CHECK(status == CFLOW_ACTOR_OK || status == CFLOW_ACTOR_STOPPED);
+    while (cflow_actor_current_state(&actor->service.actor) !=
+           CFLOW_ACTOR_STATE_STOPPED && rounds++ < 2048u)
+        (void)cflow_executor_run_one(&actor->executor);
+    CHECK(orbit_service_wait(&actor->service) ==
+          CFLOW_ACTOR_STATE_STOPPED);
+    orbit_service_ref_release(&actor->producer);
+    orbit_service_destroy(&actor->service);
+    CHECK(orbit_call_port_try_destroy(&actor->port) == ORBIT_CALL_OK);
+    cflow_scheduler_destroy(&actor->scheduler);
+    cflow_executor_destroy(&actor->executor);
+    cflow_machine_destroy(&actor->machine);
+}
+
+typedef struct dso_owned_cancel_probe {
+    dso_owned_actor *actor;
+    orbit_ace_scope_guard *scope;
+    salts_service_host_runtime *runtime;
+    salts_service_host_generation *generation;
+    cmeta_plugin_registry *registry;
+    cmeta_plugin_ref original;
+    uint64_t token;
+    atomic_int proved_busy;
+} dso_owned_cancel_probe;
+
+static void dso_owned_cancel_worker(void *user) {
+    dso_owned_cancel_probe *probe = (dso_owned_cancel_probe *)user;
+    orbit_call_port_stats stats = {0};
+    salts_service_host_status exact = SALTS_SERVICE_HOST_OK;
+    size_t spins = 0u;
+    while (!atomic_load(&probe->actor->receiver.native_entered) &&
+           spins++ < 10000u)
+        cmeta_sleep_ms(1u);
+    CHECK(atomic_load(&probe->actor->receiver.native_entered));
+    CHECK(orbit_call_port_get_stats(&probe->actor->port, &stats));
+    CHECK(stats.executing == 1u && stats.occupied == 1u);
+    CHECK(orbit_call_u64_cancel(
+        &probe->actor->port, probe->token) == ORBIT_CALL_OK);
+    CHECK(probe->actor->cancelled == 1u);
+    CHECK(orbit_call_port_get_stats(&probe->actor->port, &stats));
+    CHECK(stats.executing == 1u && stats.occupied == 1u);
+    CHECK(stats.callbacks_inflight == 0u && stats.cancelled == 1u);
+    CHECK(orbit_ace_scope_guard_try_release(
+        probe->scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
+    CHECK(salts_service_host_generation_drain(
+        probe->runtime, probe->generation) == SALTS_SERVICE_HOST_BUSY);
+    CHECK(cmeta_plugin_registry_unload(
+        probe->registry, probe->original) == CMETA_PLUGIN_BUSY);
+    CHECK(orbit_ace_scope_guard_generation_id(probe->scope) ==
+          UINT64_C(21));
+    atomic_store(&probe->proved_busy, 1);
+    atomic_store(&probe->actor->receiver.release_native, true);
+}
+
+static void test_managed_dso_lifecycle(void) {
+    const cmeta_plugin_registry_config registry_config = {2u};
+    cmeta_plugin_registry registry = {0};
+    cmeta_plugin_ref original = {0}, successor = {0};
+    cmeta_plugin_lifecycle_info lifecycle = {0};
+    dso_generation n = {0}, next = {0};
+    salts_service_host_runtime runtime = SALTS_SERVICE_HOST_RUNTIME_INIT;
+    salts_service_host_generation *previous = NULL;
+    salts_service_host_status exact = SALTS_SERVICE_HOST_OK;
+    orbit_ace_scope_guard n_scope = {0}, next_scope = {0};
+    dso_owned_actor old_actor, new_actor;
+    dso_owned_cancel_probe probe = {0};
+    cmeta_thread_t cancel_thread = NULL;
+    char label[] = "Room-A";
+    unsigned char data[] = {0u, 0xffu, 0x42u, 0x80u};
+    OwnedPacket scratch = {
+        {label, sizeof(label) - 1u}, {data, sizeof(data)}
+    };
+    OwnedPacket owned_request = {0};
+    uint64_t old_token = 0u, next_token = 0u, rejected = UINT64_MAX;
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    orbit_call_port_stats stats = {0};
+    bool quiet = false;
+
+    CHECK(cmeta_plugin_registry_init(&registry, &registry_config) ==
+          CMETA_PLUGIN_OK);
+    CHECK(cmeta_plugin_registry_load(
+        &registry, ORBIT_DSO_PROVIDER_N_PATH, &original) == CMETA_PLUGIN_OK);
+    CHECK(cmeta_plugin_registry_load(
+        &registry, ORBIT_DSO_PROVIDER_NEXT_PATH, &successor) == CMETA_PLUGIN_OK);
+    CHECK(cmeta_plugin_registry_start(&registry, original) == CMETA_PLUGIN_OK);
+    CHECK(cmeta_plugin_registry_start(&registry, successor) == CMETA_PLUGIN_OK);
+    build(&n, UINT64_C(21), &registry, original);
+    build(&next, UINT64_C(22), &registry, successor);
+    CHECK(salts_service_host_runtime_init(&runtime) ==
+          SALTS_SERVICE_HOST_OK);
+    CHECK(salts_service_host_runtime_publish(
+        &runtime, &n.generation, &previous) == SALTS_SERVICE_HOST_OK);
+    CHECK(previous == NULL);
+    CHECK(orbit_ace_scope_guard_open(
+        &n_scope, &runtime, UINT64_C(21), &exact) == ORBIT_ACE_SCOPE_OK);
+    dso_owned_actor_start(&old_actor, &n_scope, 37u);
+    CHECK(salts_service_host_runtime_publish(
+        &runtime, &next.generation, &previous) == SALTS_SERVICE_HOST_OK);
+    CHECK(previous == &n.generation);
+    CHECK(orbit_ace_scope_guard_open(
+        &next_scope, &runtime, UINT64_C(22), &exact) == ORBIT_ACE_SCOPE_OK);
+    dso_owned_actor_start(&new_actor, &next_scope, 83u);
+    CHECK(old_actor.binding.receiver != new_actor.binding.receiver);
+    CHECK(old_actor.producer.actor.impl != new_actor.producer.actor.impl);
+    CHECK(orbit_ace_scope_guard_generation_id(&n_scope) == UINT64_C(21));
+    CHECK(orbit_ace_scope_guard_generation_id(&next_scope) == UINT64_C(22));
+    CHECK(cmeta_plugin_registry_request_stop(
+        &registry, original) == CMETA_PLUGIN_OK);
+
+    CHECK(OwnedPacket_clone(&owned_request, &scratch) == 0);
+    CHECK(databind_9_OwnedGame_4_Room_4_Echo__orbit_call_async(
+        &old_actor.port, &old_actor.producer, &owned_request,
+        &old_actor.context, dso_owned_done, &old_actor, &old_token, &send) ==
+          ORBIT_CALL_OK);
+    CHECK(send == CFLOW_ACTOR_SEND_ACCEPTED && old_token != 0u);
+    CHECK(databind_9_OwnedGame_4_Room_4_Echo__orbit_call_async(
+        &new_actor.port, &new_actor.producer, &owned_request,
+        &new_actor.context, dso_owned_done, &new_actor, &next_token, &send) ==
+          ORBIT_CALL_OK);
+    CHECK(send == CFLOW_ACTOR_SEND_ACCEPTED && next_token != 0u);
+    CHECK(databind_9_OwnedGame_4_Room_4_Echo__orbit_call_async(
+        &old_actor.port, &old_actor.producer, &owned_request,
+        &old_actor.rejected_context, dso_owned_done, &old_actor,
+        &rejected, &send) == ORBIT_CALL_FULL);
+    CHECK(rejected == 0u && old_actor.successes == 0u);
+    OwnedPacket_clear(&owned_request);
+    label[0] = 'X'; data[1] = 0x11u; /* source no longer alive */
+
+    dso_owned_actor_run_until(&old_actor, 1u);
+    dso_owned_actor_run_until(&new_actor, 1u);
+    CHECK(old_actor.successes == 1u && old_actor.receiver.invocations == 1u);
+    CHECK(new_actor.successes == 1u && new_actor.receiver.invocations == 1u);
+    CHECK(old_actor.last_marker == 37u && new_actor.last_marker == 83u);
+
+    {
+        char retry_label[] = "Room-A";
+        unsigned char retry_bytes[] = {0u, 0xffu, 0x42u, 0x80u};
+        OwnedPacket retry = {
+            {retry_label, sizeof(retry_label) - 1u},
+            {retry_bytes, sizeof(retry_bytes)}
+        };
+        uint64_t cancel_token = 0u;
+        atomic_store(&old_actor.receiver.hold_before_provider, true);
+        atomic_init(&probe.proved_busy, 0);
+        CHECK(databind_9_OwnedGame_4_Room_4_Echo__orbit_call_async(
+            &old_actor.port, &old_actor.producer, &retry,
+            &old_actor.context, dso_owned_done, &old_actor,
+            &cancel_token, &send) == ORBIT_CALL_OK);
+        CHECK(send == CFLOW_ACTOR_SEND_ACCEPTED && cancel_token != 0u);
+        probe.actor = &old_actor;
+        probe.scope = &n_scope;
+        probe.runtime = &runtime;
+        probe.generation = &n.generation;
+        probe.registry = &registry;
+        probe.original = original;
+        probe.token = cancel_token;
+        CHECK(cmeta_thread_create(
+            &cancel_thread, dso_owned_cancel_worker, &probe) == 0);
+        dso_owned_actor_run_until(&old_actor, 2u);
+        CHECK(cmeta_thread_join(&cancel_thread) == 0);
+        CHECK(atomic_load(&probe.proved_busy) == 1);
+        CHECK(old_actor.successes == 1u && old_actor.cancelled == 1u);
+        CHECK(old_actor.receiver.invocations == 2u);
+        CHECK(new_actor.receiver.invocations == 1u);
+        CHECK(orbit_call_port_get_stats(&old_actor.port, &stats));
+        CHECK(stats.admitted == 2u && stats.completed_success == 1u);
+        CHECK(stats.cancelled == 1u && stats.occupied == 0u);
+        CHECK(stats.executing == 0u && stats.callbacks_inflight == 0u);
+        CHECK(orbit_call_u64_cancel(
+            &old_actor.port, cancel_token) == ORBIT_CALL_STALE);
+    }
+
+    dso_owned_actor_stop(&old_actor);
+    CHECK(orbit_ace_scope_guard_try_release(
+        &n_scope, &exact) == ORBIT_ACE_SCOPE_OK);
+    CHECK(salts_service_host_generation_drain(
+        &runtime, &n.generation) == SALTS_SERVICE_HOST_OK);
+    CHECK(cmeta_plugin_registry_get_lifecycle(
+        &registry, original, &lifecycle) == CMETA_PLUGIN_OK);
+    CHECK(lifecycle.active_leases == 0u);
+    CHECK(cmeta_plugin_registry_poll_quiescent(
+        &registry, original, &quiet) == CMETA_PLUGIN_OK);
+    CHECK(quiet);
+    CHECK(cmeta_plugin_registry_unload(
+        &registry, original) == CMETA_PLUGIN_OK);
+
+    /* The old N image has REALLY unloaded. The managed N+1 generated
+     * Room must still use its independently bound original Plugin Scope.
+     */
+    {
+        char again_label[] = "Room-A";
+        unsigned char again_bytes[] = {0u, 0xffu, 0x42u, 0x80u};
+        OwnedPacket again = {
+            {again_label, sizeof(again_label) - 1u},
+            {again_bytes, sizeof(again_bytes)}
+        };
+        uint64_t token = 0u;
+        CHECK(databind_9_OwnedGame_4_Room_4_Echo__orbit_call_async(
+            &new_actor.port, &new_actor.producer, &again,
+            &new_actor.context, dso_owned_done, &new_actor,
+            &token, &send) == ORBIT_CALL_OK);
+        CHECK(send == CFLOW_ACTOR_SEND_ACCEPTED && token != 0u);
+        dso_owned_actor_run_until(&new_actor, 2u);
+        CHECK(new_actor.successes == 2u);
+        CHECK(new_actor.receiver.invocations == 2u);
+        CHECK(new_actor.last_marker == 83u);
+    }
+    CHECK(salts_service_host_runtime_close(
+        &runtime, &previous) == SALTS_SERVICE_HOST_OK);
+    CHECK(previous == &next.generation);
+    CHECK(salts_service_host_generation_drain(
+        &runtime, &next.generation) == SALTS_SERVICE_HOST_BUSY);
+    dso_owned_actor_stop(&new_actor);
+    CHECK(orbit_ace_scope_guard_try_release(
+        &next_scope, &exact) == ORBIT_ACE_SCOPE_OK);
+    CHECK(salts_service_host_generation_drain(
+        &runtime, &next.generation) == SALTS_SERVICE_HOST_OK);
+    CHECK(salts_service_host_runtime_destroy(&runtime) ==
+          SALTS_SERVICE_HOST_OK);
+    CHECK(cmeta_plugin_registry_request_stop(
+        &registry, successor) == CMETA_PLUGIN_OK);
+    quiet = false;
+    CHECK(cmeta_plugin_registry_poll_quiescent(
+        &registry, successor, &quiet) == CMETA_PLUGIN_OK);
+    CHECK(quiet);
+    CHECK(cmeta_plugin_registry_unload(
+        &registry, successor) == CMETA_PLUGIN_OK);
+    CHECK(cmeta_plugin_registry_destroy(&registry) == CMETA_PLUGIN_OK);
+}
+
 int main(void) {
     const cmeta_plugin_registry_config registry_config = {2u};
     cmeta_plugin_registry registry = {0};
@@ -713,6 +1150,7 @@ int main(void) {
         &registry, successor) == CMETA_PLUGIN_OK);
     CHECK(cmeta_plugin_registry_destroy(&registry) == CMETA_PLUGIN_OK);
 
+    test_managed_dso_lifecycle();
     puts("Orbit true Salts Plugin DSO N/N+1 and Scope unload PASS");
     return 0;
 }
