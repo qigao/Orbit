@@ -50,10 +50,11 @@ With `ORBIT_IDL_CONFORMANCE=ON`:
    Room/Scope is active, stop/destroy its Actor and CallPort, release
    N+1's original Scope, drain and actually unload N+1.
 
-The original manually bound DSO CTest path remains available unchanged
-when the IDL conformance flag is OFF. No new CI workflow, CTest
-executable, installer/consumer project, Plugin loader, method ABI,
-reflection registry or runtime engine is introduced. `Orbit::Core`
+The obsolete manually bound non-IDL DSO CTest path has been removed.
+With IDL conformance OFF, the generated DSO test target is not
+constructed; the normal Core and original ServiceHost/Scope tests remain.
+No new CI workflow, CTest executable, installer/consumer project, Plugin
+loader, method ABI, reflection registry or runtime engine is introduced. `Orbit::Core`
 remains independent of `Orbit::ACE`.
 
 ## Qualification boundary

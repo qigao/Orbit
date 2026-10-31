@@ -38,7 +38,9 @@ The existing `tests/test_orbit_scope_dso.c` extends its **existing CTest**
 instead of adding a project/installer or duplicate workflow. With the
 explicit `ORBIT_IDL_CONFORMANCE=ON` flag, it reuses the single generated
 `game.service_native.h` produced for the core Room CTest. Otherwise, the
-previous manually bound DSO lifetime test remains available unchanged.
+obsolete manually bound DSO test is no longer compiled or run. Turning
+the IDL conformance flag OFF excludes this test rather than falling back
+to hand-written dispatch.
 
 Expected sequence:
 

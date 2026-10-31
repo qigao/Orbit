@@ -10,10 +10,8 @@
 #include <cflow/scheduler.h>
 #include <cmeta/cmeta.h>
 
-#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
 #define DATABIND_NATIVE_ENABLE_ORBIT 1
 #include "game.service_native.h"
-#endif
 
 #include <stdint.h>
 #include <stdio.h>
@@ -67,7 +65,6 @@ static int actual_provider_value(orbit_ace_scope_guard *scope) {
     return orbit_dso_value_get(&value);
 }
 
-#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
 /*
  * The SAME NativeSourceIR business symbols emitted for Game.Room are used
  * here, but their instance receiver is the Salts Plugin Provider projection
@@ -102,7 +99,6 @@ int databind_4_Game_4_Room_4_Pong(
     response->ack = request->seq + (uint64_t)value + UINT64_C(100);
     return 0;
 }
-#endif
 
 /*
  * Genuine DSO-owned provider -> post-commit CFlow Actor -> bounded Orbit
@@ -116,10 +112,7 @@ typedef struct dso_actor {
     orbit_service service;
     orbit_service_ref producer;
     orbit_call_port port;
-    orbit_ace_scope_guard *scope;
     cflow_machine_action_binding action[2];
-    orbit_service_method method;
-#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
     dso_room_receiver receiver;
     databind_4_Game_4_Room__orbit_binding binding;
     databind_4_Game_4_Room_4_Ping__orbit_context ping_context;
@@ -127,7 +120,6 @@ typedef struct dso_actor {
     databind_4_Game_4_Room_4_Ping__orbit_context cancel_context;
     uint64_t first_result;
     unsigned cancelled;
-#endif
     int state;
     unsigned observed;
     unsigned callbacks;
@@ -155,7 +147,6 @@ static bool dso_actor_observe(
     CHECK(actor != NULL && value != NULL);
     CHECK(cmeta_type_equal(type, &cmeta_type_uint64));
     token = *(const uint64_t *)value;
-#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
     /*
      * Real generated, contextual post-commit dispatch calls the original
      * native symbol with the scope-pinned DSO Provider receiver.
@@ -166,20 +157,6 @@ static bool dso_actor_observe(
         /* A previously cancelled local call is a stale generation token. */
         CHECK(step == ORBIT_CALL_OK || step == ORBIT_CALL_STALE);
     }
-#else
-    {
-        uint64_t request = 0u;
-        int provider;
-        CHECK(orbit_call_u64_request(
-            &actor->port, token, UINT64_C(10), &request) == ORBIT_CALL_OK);
-        provider = actual_provider_value(actor->scope);
-        CHECK(provider == 37);
-        CHECK(orbit_call_u64_stage_reply(
-            &actor->port, token, UINT64_C(10), 0,
-            request + (uint64_t)provider) == ORBIT_CALL_OK);
-        CHECK(orbit_call_u64_observe(&actor->port, token) == ORBIT_CALL_OK);
-    }
-#endif
     ++actor->observed;
     return true;
 }
@@ -198,7 +175,6 @@ static void dso_actor_on_done(void *user) {
         &actor->port, ORBIT_CALL_TERMINAL_STOPPED) == ORBIT_CALL_OK);
 }
 
-#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
 static void dso_generated_ping_done(
     void *user, uint64_t token, orbit_call_terminal terminal,
     int application_status, const PingResponse *response) {
@@ -230,18 +206,6 @@ static void dso_generated_cancel_done(
     CHECK(application_status == 0 && response == NULL);
     ++actor->cancelled;
 }
-#else
-static void dso_actor_on_reply(void *user, uint64_t token,
-                               orbit_call_terminal terminal,
-                               int application_status, uint64_t value) {
-    dso_actor *actor = (dso_actor *)user;
-    CHECK(actor != NULL && token != 0u);
-    CHECK(terminal == ORBIT_CALL_TERMINAL_SUCCESS);
-    CHECK(application_status == 0);
-    ++actor->callbacks;
-    actor->last_result = value;
-}
-#endif
 
 static void dso_actor_start(dso_actor *actor, orbit_ace_scope_guard *scope) {
     const cflow_machine_state states[] = {
@@ -264,11 +228,7 @@ static void dso_actor_start(dso_actor *actor, orbit_ace_scope_guard *scope) {
         {1u, 100u, 0u, 300u, 1u, 1u},
         {1u, 101u, 0u, 301u, 1u, 1u}
     };
-#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
     const size_t event_count = 2u;
-#else
-    const size_t event_count = 1u;
-#endif
     const cflow_machine_definition definition = {
         states, 1u, 1u, events, event_count, NULL, 0u,
         actions, event_count, transitions, event_count
@@ -277,7 +237,6 @@ static void dso_actor_start(dso_actor *actor, orbit_ace_scope_guard *scope) {
     orbit_service_config service_config;
 
     memset(actor, 0, sizeof(*actor));
-    actor->scope = scope;
     CHECK(cflow_machine_build(&actor->machine, &definition) == CFLOW_MACHINE_OK);
     CHECK(cflow_executor_owner_init_with_capacity(
         &actor->executor, 64u, NULL, NULL));
@@ -297,15 +256,8 @@ static void dso_actor_start(dso_actor *actor, orbit_ace_scope_guard *scope) {
     config.callbacks = (cflow_subscriber_callbacks){
         dso_actor_observe, dso_actor_on_error, dso_actor_on_done, actor
     };
-#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
     /* Use exactly the one ServiceHost Scope acquired before Actor start. */
     service_config = databind_4_Game_4_Room__orbit_service_config(&config);
-#else
-    actor->method = (orbit_service_method){
-        UINT64_C(10), 100u, &cmeta_type_uint64, ORBIT_METHOD_CALL_TOKEN
-    };
-    service_config = (orbit_service_config){&config, &actor->method, 1u};
-#endif
     CHECK(orbit_service_spawn(&actor->service, &service_config).status ==
           ORBIT_SERVICE_OK);
     CHECK(orbit_call_port_init(&actor->port, &actor->service, 2u) ==
@@ -313,7 +265,6 @@ static void dso_actor_start(dso_actor *actor, orbit_ace_scope_guard *scope) {
     CHECK(orbit_service_ref_acquire(
         &actor->service, &actor->producer));
 
-#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
     {
         salts_configurator_service service;
         orbit_dso_value view = orbit_dso_value_bind(NULL, NULL);
@@ -327,7 +278,6 @@ static void dso_actor_start(dso_actor *actor, orbit_ace_scope_guard *scope) {
             &actor->binding, &actor->port, &actor->receiver));
         CHECK(actor->binding.receiver == &actor->receiver);
     }
-#endif
     CHECK(orbit_ace_scope_guard_bind(
         scope, &actor->service, &actor->port) == ORBIT_ACE_SCOPE_OK);
 }
@@ -365,10 +315,8 @@ int main(void) {
     orbit_ace_scope_guard next_scope = {0};
     salts_service_host_status exact = SALTS_SERVICE_HOST_OK;
     dso_actor actor;
-#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
     dso_actor successor_actor;
     uint64_t successor_ping_token = 0u;
-#endif
     uint64_t actor_token = 0u;
     cflow_actor_send_status actor_send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
     unsigned rounds = 0u;
@@ -410,7 +358,6 @@ int main(void) {
     CHECK(orbit_ace_scope_guard_open(
         &next_scope, &runtime, UINT64_C(22), &exact) == ORBIT_ACE_SCOPE_OK);
     CHECK(actual_provider_value(&next_scope) == 83);
-#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
     /*
      * Both generations own live, independently scheduled generated Rooms.
      * The second Room MUST acquire its receiver from the newly published
@@ -422,7 +369,6 @@ int main(void) {
     CHECK(orbit_ace_scope_guard_generation_id(&next_scope) == UINT64_C(22));
     CHECK(orbit_ace_scope_guard_try_release(&next_scope, &exact) ==
           ORBIT_ACE_SCOPE_BUSY);
-#endif
     /* Old provider still executes from its original loaded DSO. */
     CHECK(actual_provider_value(&old_scope) == 37);
     CHECK(salts_service_host_generation_drain(
@@ -436,7 +382,6 @@ int main(void) {
     /* The OLD dynamically loaded Provider is invoked inside the Actor's
      * real post-commit CFlow Subscriber after N+1 has been published.
      */
-#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
     {
         PingRequest ping = {UINT64_C(5)};
         PingRequest pong = {UINT64_C(7)};
@@ -512,17 +457,6 @@ int main(void) {
         CHECK(orbit_call_u64_cancel(&actor.port, cancel_token) ==
               ORBIT_CALL_STALE);
     }
-#else
-    CHECK(orbit_call_u64_async(
-        &actor.port, &actor.producer, UINT64_C(10), UINT64_C(5),
-        dso_actor_on_reply, &actor, &actor_token, &actor_send) ==
-          ORBIT_CALL_OK);
-    CHECK(actor_send == CFLOW_ACTOR_SEND_ACCEPTED);
-    while (actor.callbacks == 0u && rounds++ < 2048u)
-        (void)cflow_executor_run_one(&actor.executor);
-    CHECK(actor.callbacks == 1u && actor.observed == 1u);
-    CHECK(actor.errors == 0u && actor.last_result == UINT64_C(42));
-#endif
     CHECK(orbit_ace_scope_guard_generation_id(&old_scope) == UINT64_C(21));
 
     dso_actor_stop(&actor);
@@ -543,7 +477,6 @@ int main(void) {
     CHECK(cmeta_plugin_registry_unload(
         &registry, original) == CMETA_PLUGIN_OK);
 
-#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
     {
         /*
          * Old N's real DSO is already unloaded. A still-active N+1
@@ -568,20 +501,17 @@ int main(void) {
             &successor_actor.port, successor_ping_token) ==
               ORBIT_CALL_STALE);
     }
-#endif
 
     CHECK(salts_service_host_runtime_close(
         &runtime, &previous) == SALTS_SERVICE_HOST_OK);
     CHECK(previous == &next.generation);
     CHECK(salts_service_host_generation_drain(
         &runtime, &next.generation) == SALTS_SERVICE_HOST_BUSY);
-#if defined(ORBIT_TEST_IDL_CONTEXT_DSO)
     dso_actor_stop(&successor_actor);
     CHECK(orbit_ace_scope_guard_try_release(
         &next_scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
     CHECK(orbit_call_port_try_destroy(&successor_actor.port) ==
           ORBIT_CALL_OK);
-#endif
     CHECK(orbit_ace_scope_guard_try_release(
         &next_scope, &exact) == ORBIT_ACE_SCOPE_OK);
     CHECK(salts_service_host_generation_drain(
