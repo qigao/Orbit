@@ -1133,9 +1133,12 @@ static void test_owned_value_deepcopy_and_capacity(void) {
     CHECK(orbit_call_port_get_stats(&f.calls, &stats));
     CHECK(stats.occupied == 0u && stats.executing == 0u);
     CHECK(stats.completed_success == 1u && stats.rejected_full == 1u);
-    CHECK(orbit_call_value_begin(&f.calls, token, 10u,
-                                 (const void **)&source.data) ==
-          ORBIT_CALL_STALE);
+    {
+        const void *expired_request = NULL;
+        CHECK(orbit_call_value_begin(&f.calls, token, 10u,
+                                     &expired_request) == ORBIT_CALL_STALE);
+        CHECK(expired_request == NULL);
+    }
 
     CHECK(stl_byte_buffer_resize(&oversize, 33u) == STL_OK);
     CHECK(orbit_call_value_async(
