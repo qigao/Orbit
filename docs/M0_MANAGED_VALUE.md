@@ -286,3 +286,46 @@ introduced. These controlled close hooks do not establish exhaustive
 concurrent scheduling, ThreadSanitizer correctness or recoverable
 Provider restore failures. Remote RPC/Streaming and business COMMIT/ACK
 remain separate product gates.
+
+## M0k.2h activation-only Scope/CallPort admission (pending exact CI)
+
+The Salts ServiceHost Scope remains the **only** Provider lease. The ACE
+`orbit_ace_scope_guard_bind` control-plane operation now checks the live
+original CallPort identity and requires a clean **never-admitted** Port,
+not merely one whose old tokens have already been settled. A closed Port,
+a foreign Port from a second CFlow Actor, or a Port that has ever admitted
+a call fails with `ORBIT_ACE_SCOPE_INVALID_ARGUMENT`, before the Scope
+records the Actor/Port owners. A successful activation still uses the
+existing single `orbit_ace_scope_guard_bind` and canonical generated
+`native_context(1)` receiver.
+
+The existing `orbit.ace.provider_native` CTest intentionally exercises
+wrong Actor/Port pairings across two independently published original
+ServiceHost generations N and N+1, a never-used but closed CallPort, and
+an already-admitted CallPort (both before and after the terminal callback).
+Its test-only deliberately late-bound Actor is kept under a manually live
+Scope through complete owner teardown; it never proves it is safe to
+release a Scope before binding. The preexisting positive N->N+1 and
+real generated managed DSO suites remain mandatory.
+
+**Remaining hard boundary:** an application-owned `void *receiver` is an
+opaque business object. Comparing Port and Actor identity does **not**
+prove that receiver's embedded CMeta Provider projection originated in
+the same Scope. Callers must acquire the typed Provider through the
+original `guard_find_service` and bind during serialized activation,
+before any producer can submit. A future automatic Provider-provenance
+claim would need an explicitly Scope-minted activation capability;
+do not pretend raw pointers make that claim. Concurrent binding vs
+admission is invalid owner behavior rather than an implicitly locked
+runtime contract.
+
+The CMake dependency is the canonical `find_package(CMeta CONFIG REQUIRED)`
+in both source and exported package; CI still pins immutable CMeta/Core
+source revisions, Clang/llvm-mingw and the actual ServiceHost ABI v2 symbol
+at compile/link time. Removing the redundant package-version constraint
+does **not** permit another Provider ABI or SDK fallback.
+
+This extension does not add a parser, generated function ABI, Actor,
+ServiceHost replacement, second CTest executable, CI workflow, package
+probe or installer/consumer application. **Draft until current exact-head
+native Linux/Windows CI runs.**
