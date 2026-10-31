@@ -211,3 +211,47 @@ accepted, so NO_REPLY is the fail-closed local terminal rather than silent
 credit leakage. This is a controlled fault-injection of the canonical
 provider copy callback in the existing native CTest, not a separate
 allocator/runtime, parser, CMake probe, CI workflow or consumer app.
+
+
+## M0k.2f Provider reentry and lock-free VALUE lifecycle
+
+Review of the original CallPort found two external CMeta lifecycle
+callbacks previously invoked under the original Port mutex: staging an
+accepted owning response via cmeta_data_value_copy and retiring a slot
+via cmeta_data_value_restore_zero. Those callbacks can reenter public
+Port APIs and cannot safely be treated as lock-free inert memory copies.
+
+The same bounded CallPort now reserves STAGING while the existing
+post-commit business execution borrow is active. The actual CMeta
+response size/read and deep-copy execute without the mutex. Reentrant
+get_stats, cancel and close are supported; an attempted reentrant
+business end or observe during STAGING returns BUSY. Cancel/close may
+claim the one local terminal, but cannot recycle the slot before the
+original stage operation finishes and its execution pin retires.
+
+All owned request and response restores run outside the mutex only
+after the slot transitions to RECLAIMING. The credit stays occupied and
+the token is STALE throughout this phase. A concurrent/reentrant
+admission remains FULL until both original Provider restores finish.
+This applies independently to rejected pre-admission copies, close
+during submission, CFlow send rejection, terminal callback exit and
+cancellation after native business execution. Provider teardown may
+reenter try_destroy; the original Port marks its final destruction
+boundary and rejects recursive destruction as BUSY.
+
+The existing native test uses the original fault-injectable CMeta
+BufferOps-v2 provider, and enables its external copy hook only inside
+Port-stage (not business-local response construction). That hook
+reenters stats, attempts end and observe (both BUSY), and cancels the
+same generation (one CANCELLED, no late SUCCESS). Reuse only succeeds
+after the original business borrow and provider copy complete. A
+separate restore hook runs while RECLAIMING and reenters stats,
+try_destroy and another bounded admission (FULL); cleanup then
+finishes and a fresh generation succeeds. Neither test installs an
+alternate runtime, custom provider ABI or separate CTest project.
+
+A CMeta restore failure remains a fail-stop ownership violation:
+both independent restores are attempted, but unsafe partially freed
+storage is never published as reusable. This is not a general
+recoverable allocator failure, nested/nullable VALUE admission,
+exhaustive scheduler/TSan proof, Streaming or RPC/COMMIT-ACK gate.
