@@ -148,6 +148,7 @@ typedef struct call_probe {
     atomic_bool hold_owned_business;
     atomic_bool owned_business_entered;
     atomic_bool release_owned_business;
+    atomic_bool fail_owned_reply_copy;
 } call_probe;
 
 typedef struct call_fixture {
@@ -352,9 +353,16 @@ static bool call_owned_observe(void *user, const cmeta_type_desc *type,
     }
     CHECK(test_owned_from(
         &reply, expected, sizeof(expected), 32u));
-    status = orbit_call_value_stage_reply(
-        &f->calls, token, 10u, 0, &reply);
-    CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
+    {
+        const bool fail = atomic_load(&f->probe.fail_owned_reply_copy);
+        /* Fail the canonical Port's deep-copy, not business construction. */
+        if (fail) atomic_store(&test_owned_fail_copy, true);
+        status = orbit_call_value_stage_reply(
+            &f->calls, token, 10u, 0, &reply);
+        if (fail) atomic_store(&test_owned_fail_copy, false);
+        if (fail) CHECK(status == ORBIT_CALL_VALUE_COPY_FAILED);
+        else CHECK(status == ORBIT_CALL_OK || status == ORBIT_CALL_STALE);
+    }
     test_owned_destroy(&reply); /* application still owns the reply */
     CHECK(orbit_call_value_end(&f->calls, token, 10u) == ORBIT_CALL_OK);
     status = orbit_call_value_observe(&f->calls, token);
@@ -398,6 +406,9 @@ static void call_owned_terminal(
         CHECK(response == NULL);
         CHECK(stats.executing == 1u); /* request still borrowed! */
         atomic_fetch_add(&p->cancelled, 1);
+    } else if (outcome == ORBIT_CALL_TERMINAL_NO_REPLY) {
+        CHECK(response == NULL && stats.executing == 0u);
+        atomic_fetch_add(&p->no_reply, 1);
     } else {
         CHECK(0 && "unexpected native VALUE terminal");
     }
@@ -458,6 +469,7 @@ static void fixture_prepare_ex(call_fixture *fixture, size_t mailbox_capacity,
     atomic_init(&fixture->probe.hold_owned_business, false);
     atomic_init(&fixture->probe.owned_business_entered, false);
     atomic_init(&fixture->probe.release_owned_business, false);
+    atomic_init(&fixture->probe.fail_owned_reply_copy, false);
     CHECK(cflow_machine_build(&fixture->machine, &definition) == CFLOW_MACHINE_OK);
     CHECK(cflow_executor_owner_init_with_capacity(
         &fixture->executor, 64u, NULL, NULL));
@@ -1503,6 +1515,62 @@ static void test_owned_callback_close_keeps_reply(void) {
     fixture_destroy(&f);
 }
 
+
+/* Failure while staging the canonical owned response must NOT deliver
+ * invented SUCCESS; callback is NO_REPLY/NULL, storage and credit retire
+ * exactly once, and a later generation of the same slot remains usable.
+ */
+static void test_owned_response_copy_fault_and_recovery(void) {
+    call_fixture f;
+    test_owned_bytes source = {0};
+    const unsigned char raw[] = {0u, 0xffu, 0x42u, 0x80u};
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    orbit_call_port_stats stats = {0};
+    uint64_t failed_token = 0u, successful_token = 0u;
+
+    fixture_prepare_ex(&f, 2u, 1u, true);
+    atomic_store(&f.probe.fail_owned_reply_copy, true);
+    CHECK(test_owned_from(&source, raw, sizeof(raw), 32u));
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &source,
+        call_owned_terminal, &f.probe, &failed_token, &send) == ORBIT_CALL_OK);
+    CHECK(failed_token != 0u && send == CFLOW_ACTOR_SEND_ACCEPTED);
+    test_owned_destroy(&source);
+    fixture_drive_until(&f, &f.probe.no_reply, 1);
+    CHECK(!atomic_load(&test_owned_fail_copy));
+    CHECK(atomic_load(&f.probe.business_executions) == 1);
+    CHECK(atomic_load(&f.probe.callback_count) == 1);
+    CHECK(atomic_load(&f.probe.successes) == 0);
+    CHECK(atomic_load(&f.probe.no_reply) == 1);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.admitted == 1u && stats.completed_error == 1u);
+    CHECK(stats.completed_success == 0u && stats.occupied == 0u);
+    CHECK(stats.callbacks_inflight == 0u && stats.executing == 0u);
+    CHECK(orbit_call_u64_cancel(&f.calls, failed_token) == ORBIT_CALL_STALE);
+
+    atomic_store(&f.probe.fail_owned_reply_copy, false);
+    CHECK(test_owned_from(&source, raw, sizeof(raw), 32u));
+    CHECK(orbit_call_value_async(
+        &f.calls, &f.ref, 10u, &source,
+        call_owned_terminal, &f.probe, &successful_token, &send) ==
+          ORBIT_CALL_OK);
+    CHECK(successful_token != 0u && successful_token != failed_token);
+    CHECK(send == CFLOW_ACTOR_SEND_ACCEPTED);
+    test_owned_destroy(&source);
+    fixture_drive_until(&f, &f.probe.successes, 1);
+    CHECK(atomic_load(&f.probe.business_executions) == 2);
+    CHECK(atomic_load(&f.probe.callback_count) == 2);
+    CHECK(atomic_load(&f.probe.no_reply) == 1);
+    CHECK(atomic_load(&f.probe.successes) == 1);
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.admitted == 2u && stats.completed_error == 1u);
+    CHECK(stats.completed_success == 1u && stats.occupied == 0u);
+    CHECK(stats.callbacks_inflight == 0u && stats.executing == 0u);
+    CHECK(orbit_call_u64_cancel(&f.calls, successful_token) ==
+          ORBIT_CALL_STALE);
+    fixture_destroy(&f);
+}
+
 int main(void) {
     test_mailbox_rejection_and_postcommit();
     test_cancel_credit_reuse();
@@ -1514,6 +1582,7 @@ int main(void) {
     test_owned_value_deepcopy_and_capacity();
     test_owned_execution_cancel_keeps_request();
     test_owned_callback_close_keeps_reply();
+    test_owned_response_copy_fault_and_recovery();
     test_concurrent_producers_and_terminals();
     test_concurrent_close_during_admission();
     return 0;

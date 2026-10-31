@@ -187,3 +187,27 @@ CTest executable, CI workflow or installer/consumer project. It uses the
 same test-local canonical CMeta BufferOps-v2 provider and Salts Platform
 thread API. It does not establish exhaustive scheduling, sanitizer/TSan,
 remote RPC, Streaming or business COMMIT/ACK.
+
+
+## M0k.2e response deep-copy failure and subsequent reuse
+
+The existing Core native test now forces the canonical CMeta BufferOps-v2
+provider to fail specifically when the *owned business response* is being
+deep-copied into the original CallPort's reply slot, after business-side
+response construction succeeded. The application destroys its local
+response separately; the Port must restore any partially staged reply to
+semantic zero without inventing a successful terminal.
+
+The test expects exactly one NO_REPLY terminal with a NULL borrowed
+response, one failed accepted call, no leaked occupied/executing/callback
+credits, and a stale original token. Without changing the Actor/Port owner,
+the test retries a new managed request on the same capacity-one slot,
+receives a genuine SUCCESS and verifies independent new-generation token,
+correct raw owning binary reply and one callback per accepted request.
+
+The earlier pre-admission request-copy fault remains a *different* gate:
+zero token, no admission and no callback. Here the request was already
+accepted, so NO_REPLY is the fail-closed local terminal rather than silent
+credit leakage. This is a controlled fault-injection of the canonical
+provider copy callback in the existing native CTest, not a separate
+allocator/runtime, parser, CMake probe, CI workflow or consumer app.
