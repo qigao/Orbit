@@ -1,16 +1,6 @@
 name: Orbit native C11 Service contract
 
 on:
-  push:
-    branches:
-      - feat/m0c-servicehost-scope-bridge
-    paths:
-      - "CMakeLists.txt"
-      - "cmake/**"
-      - "core/**"
-      - "ace/**"
-      - "tests/**"
-      - ".github/workflows/native-c11.yml"
   pull_request:
     paths:
       - "CMakeLists.txt"
@@ -117,7 +107,7 @@ jobs:
               "-DCMAKE_PREFIX_PATH=$sdk" \
               -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=ON
             cmake --build "_build/orbit-$mode" --parallel 2
-            ctest --test-dir "_build/orbit-$mode" -N | grep -q '^Total Tests: 4$'
+            ctest --test-dir "_build/orbit-$mode" -N | grep -q '^Total Tests: 5$'
             ctest --test-dir "_build/orbit-$mode" \
               --no-tests=error --output-on-failure --timeout 120
           done
@@ -133,7 +123,7 @@ jobs:
             "-DCMAKE_PREFIX_PATH=$sdk" \
             -DBUILD_TESTING=ON -DORBIT_BUILD_ACE=OFF
           cmake --build _build/orbit-core-only --parallel 2
-          ctest --test-dir _build/orbit-core-only -N | grep -q '^Total Tests: 2$'
+          ctest --test-dir _build/orbit-core-only -N | grep -q '^Total Tests: 3$'
           ctest --test-dir _build/orbit-core-only \
             --no-tests=error --output-on-failure --timeout 120
 

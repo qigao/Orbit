@@ -43,6 +43,9 @@ if(ORBIT_BUILD_ACE)
 endif()
 
 if(BUILD_TESTING)
+  # C++17 header/ABI acceptance lives in the EXISTING native CTest graph.
+  # The shipped Orbit libraries remain pure C11 and require no C++ runtime.
+  enable_language(CXX)
   add_subdirectory(tests)
 endif()
 

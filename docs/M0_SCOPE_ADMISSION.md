@@ -144,3 +144,12 @@ copied source headers may be used as fallback.
 All Orbit PRs remain Draft. No claim of compile pass, CTest pass, package
 publication, merge or full ServiceHost/Plugin acceptance is authorized merely
 by this document or an accepted source commit.
+
+## Existing-source C++17 public contract gate
+
+The same in-repository native CTest graph also compiles and links
+`tests/test_orbit_public_cpp.cpp` against the actual installed Salts 3
+CMeta/CFlow SDK and Orbit's C ABI (with/without the optional ACE adapter).
+This proves the exported C11 headers admit C++17 consumers without an
+additional installer/consumer project. It is **not** an assertion of generic
+C++ Service code generation or arbitrary managed-type ABI.

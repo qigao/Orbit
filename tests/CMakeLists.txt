@@ -22,3 +22,14 @@ if(ORBIT_BUILD_ACE)
   target_link_libraries(orbit_scope_provider_native_test PRIVATE Orbit::ACE)
   add_test(NAME orbit.ace.provider_native COMMAND orbit_scope_provider_native_test)
 endif()
+
+# The normal native test graph owns public C++17 C ABI admission. This is
+# not an installer, SDK probe or a second consumer project.
+add_executable(orbit_public_cpp_test test_orbit_public_cpp.cpp)
+target_compile_features(orbit_public_cpp_test PRIVATE cxx_std_17)
+target_link_libraries(orbit_public_cpp_test PRIVATE Orbit::Core)
+if(ORBIT_BUILD_ACE)
+  target_compile_definitions(orbit_public_cpp_test PRIVATE ORBIT_TEST_HAS_ACE=1)
+  target_link_libraries(orbit_public_cpp_test PRIVATE Orbit::ACE)
+endif()
+add_test(NAME orbit.public.cpp17 COMMAND orbit_public_cpp_test)
