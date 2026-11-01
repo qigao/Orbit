@@ -606,3 +606,39 @@ The *new exact HEAD* must run the original Linux Clang Debug/Release
 ACE+IDL, Core-only, full-source TSan and Windows llvm-mingw ACE+IDL
 graphs before this Draft can claim qualification. No extra CTest
 executable, workflow, independent CI project or consumer/installer test.
+
+## M0k.2o deterministic real DSO authored teardown / N+1 callback overlap
+
+The existing original `orbit_scope_dso_native_test` is invoked in a fourth,
+**separate-process** CTest mode
+`orbit.ace.dso_authored_callback_overlap`. It reuses the exact original
+ServiceHost generations 21/22, real Provider N/N+1 DSOs, canonical CMeta
+`ObjectRef.data` descriptors authored within those modules, and the same
+CFlow Actor/CallPort/executor. No runtime scheduler, Plugin loader, ABI,
+test executable, workflow or consumer project is added.
+
+The N+1 Actor's genuine generated Ping terminal callback is held by an
+atomic handoff while its original CFlow executor runs on one native thread.
+The main test thread observes an **actual in-flight terminal credit**,
+checks N+1 Scope release and generation drain return BUSY and its real
+Plugin lease remains active, then stops old N's already-quiescent Actor and
+runs its *DSO-owned* deliberately faulty final CMeta `restore_zero` on the
+main thread. Old N's original CallPort is quarantined, Scope release,
+generation drain and real Plugin unload return BUSY, yet the **N+1 callback
+must remain active and N+1's independent Provider vtable callable throughout
+the faulty teardown**. Only after these checks does the main thread release
+the blocked callback, join the executor thread and verify its single
+successful terminal. N+1 must then execute a second generated Ping and
+ultimately drain/unload normally. Old N is never force-freed, and the
+negative test process exits with its deliberately pinned owner.
+
+This is a **deterministic partial-order schedule**, not a claim of exhaustive
+interleaving or arbitrary malicious C code isolation. It does not race
+`try_destroy` against an in-flight *old N* managed business borrow, does not
+attempt recovery after a broken live RECLAIMING no-fail callback, and does
+not support unsupported nested/nullable VALUE shapes. Both previously
+qualified sequential modes remain separate. The exact new HEAD must pass
+Linux Clang Debug/Release ACE+IDL **11/11**, Core **5/5**, full-source
+Clang TSan **11/11**, and Windows llvm-mingw/UCRT ACE+IDL **11/11** plus
+Core **5/5** before it can be treated as qualified. This is not release
+authorization; the entire stacked PR chain remains Draft.
