@@ -499,3 +499,50 @@ CI on this new HEAD must still pass. Existing generated scalar and managed
 N/N+1 real DSO cancellation, old Provider unload and live N+1 continuation
 remain a separate mandatory acceptance. No general nested/nullable VALUE,
 remote H2/Streaming, durable COMMIT/ACK or exhaustive scheduler proof.
+
+
+## M0k.2m real Plugin DSO lease under final VALUE quarantine
+
+The original CMeta #1340 checked temp close and Orbit #42 quarantining
+CallPort have an independent Core-only negative test. This additional
+mode of the existing orbit.ace.dso_native executable carries the owner
+lifetime witness through the genuine Salts ServiceHost Plugin DSO.
+
+- Publish actual N=21 and N+1=22 generation snapshots, load and start
+  their original N and N+1 DSOs, and open separate real Scope guards.
+- Bind one original Game.Room CFlow Actor to old N with an owning
+  capacity-one CallPort using a test-local CMeta BufferOps v2 descriptor.
+  The descriptor's final no-fail semantic-zero postcondition is made
+  intentionally invalid only after the Actor has stopped and been
+  destroyed; its failure callback calls the real old N Plugin DSO vtable
+  to prove old N code is still loaded at the final cleanup boundary.
+- A final quiescent call_port_try_destroy returns
+  ORBIT_CALL_VALUE_CLEANUP_FAILED; both retry and original Scope release
+  remain refused. Real generation drain and Plugin registry unload are
+  BUSY; the old Provider getter still executes from its original N DSO.
+- The independent N+1 generated Room succeeds both before and after
+  the old N final cleanup quarantine. N+1 can stop, destroy its healthy
+  Port, release its genuine Scope, drain and unload its own Provider
+  while old N is intentionally still pinned.
+
+This is a **test-local malformed owning CMeta descriptor** whose failure
+callback enters an actual Plugin DSO. The existing DSO's exported
+Provider itself was not modified to supply a malformed data descriptor;
+do not report this as proof of a DSO-authored malicious VALUE provider.
+The tested property is real DSO/Scope retention after a CMeta cleanup
+contract violation. Reproducing a malicious descriptor implemented
+inside a DSO, as opposed to bound while that DSO is leased, is a
+separate trust-boundary test if required.
+
+The negative mode runs as a second command of the SAME existing DSO
+test executable, in an isolated process because the invalid old-N
+owner MUST NOT be force-destroyed or unloaded. No new CTest executable,
+CI workflow, plugin loader, Provider ABI, schema, parser or consumer
+project is added. The existing Clang source-level TSan graph executes
+this real-life owner lifecycle mode as well.
+
+Broken no-fail Provider cleanup is fail-closed/quarantined at already
+quiescent final teardown, not recoverable. In-progress RECLAIMING
+cleanup violations still abort. The test cannot prove every possible
+concurrent schedule, runtime isolation from malicious native source,
+remote RPC, Streaming or persistent business COMMIT/ACK.
