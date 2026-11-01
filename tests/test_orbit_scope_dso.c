@@ -9,6 +9,7 @@
 #include <cflow/executor.h>
 #include <cflow/scheduler.h>
 #include <cmeta/cmeta.h>
+#include <cmeta/data.h>
 #include <salts/thread.h>
 
 #define DATABIND_NATIVE_ENABLE_ORBIT 1
@@ -260,7 +261,9 @@ static bool dso_actor_init_receiver(
     return true;
 }
 
-static void dso_actor_start(dso_actor *actor, orbit_ace_scope_guard *scope) {
+static void dso_actor_start_with_value(
+    dso_actor *actor, orbit_ace_scope_guard *scope,
+    const orbit_call_value_contract *managed_contract) {
     const cflow_machine_state states[] = {
         {1u, &cmeta_type_int, CFLOW_MACHINE_STATE_ACTIVE}
     };
@@ -319,8 +322,18 @@ static void dso_actor_start(dso_actor *actor, orbit_ace_scope_guard *scope) {
     service_config = databind_4_Game_4_Room__orbit_service_config(&config);
     CHECK(orbit_service_spawn(&actor->service, &service_config).status ==
           ORBIT_SERVICE_OK);
-    CHECK(orbit_call_port_init(&actor->port, &actor->service, 2u) ==
-          ORBIT_CALL_OK);
+    if (managed_contract != NULL) {
+        /* An isolated negative test uses the SAME original Actor and Port
+         * with one owning CMeta VALUE contract; no call is ever published
+         * through the scalar generated business method in that instance.
+         */
+        CHECK(orbit_call_port_init_value(
+            &actor->port, &actor->service, 1u, managed_contract) ==
+              ORBIT_CALL_OK);
+    } else {
+        CHECK(orbit_call_port_init(&actor->port, &actor->service, 2u) ==
+              ORBIT_CALL_OK);
+    }
     CHECK(orbit_service_ref_acquire(
         &actor->service, &actor->producer));
 
@@ -341,6 +354,11 @@ static void dso_actor_start(dso_actor *actor, orbit_ace_scope_guard *scope) {
             &actor->binding, &actor->port, receiver));
         CHECK(actor->binding.receiver == receiver);
     }
+}
+
+static void dso_actor_start(
+    dso_actor *actor, orbit_ace_scope_guard *scope) {
+    dso_actor_start_with_value(actor, scope, NULL);
 }
 
 static void dso_actor_stop(dso_actor *actor) {
