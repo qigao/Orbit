@@ -71,6 +71,12 @@ if(ORBIT_BUILD_ACE)
     # the original N DSO-authored faulty CMeta teardown is quarantined.
     add_test(NAME orbit.ace.dso_authored_callback_overlap
       COMMAND orbit_scope_dso_native_test --dso-authored-callback-overlap)
+    # M0k.2p: two original N-generation Scope guards: one separate
+    # DSO-authored faulty final VALUE Port, one live generated managed
+    # request borrow cancelled during business. Same original executable
+    # and native CI, isolated process for deliberately quarantined owner.
+    add_test(NAME orbit.ace.dso_authored_old_borrow_quarantine
+      COMMAND orbit_scope_dso_native_test --dso-authored-old-borrow-quarantine)
   endif()
 endif()
 

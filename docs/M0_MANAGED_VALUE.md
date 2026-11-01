@@ -658,3 +658,79 @@ Linux Clang Debug/Release ACE+IDL **11/11**, Core **5/5**, full-source
 Clang TSan **11/11**, and Windows llvm-mingw/UCRT ACE+IDL **11/11** plus
 Core **5/5** before it can be treated as qualified. This is not release
 authorization; the entire stacked PR chain remains Draft.
+
+## M0k.2p old-N in-flight managed execution borrow vs faulty DSO-owned cleanup
+
+This test is **not** a second runtime, Provider ABI or recovery mechanism.
+It uses one original ServiceHost generation N with **two distinct, genuine
+Scope guards**, because `orbit_ace_scope_guard_activate_native` binds exactly
+one original Actor/CallPort per Scope. The two guards retain independent
+Scope/Port obligations for the same real N Plugin DSO. They each count
+toward the ServiceHost generation's `active_scopes`; this does **not**
+imply two separate Plugin registry `active_leases` (the original
+ServiceHost generation holds the registry lease).
+
+- Scope A owns the original N DSO-authored **broken** owning CMeta VALUE
+  descriptor; its Actor is fully quiescent and destroyed before any final
+  teardown. Its managed Port still retains its original DSO-defined DataDesc.
+- Scope B owns a **healthy actual generated** `OwnedGame.Room.Echo` with
+  C11 `OwnedPacket` text and binary bytes (including embedded NUL). Its
+  CallPort deep-clones a request, and the caller clears/mutates the source
+  immediately after acceptance. The actual generated native method holds
+  the execution borrow before invoking the real original N DSO getter.
+- N+1 has its own independent published generation/Scope and original
+  generated Ping. Real N+1 Ping runs once before and once after failure.
+
+An independent native worker waits until Scope B's business function has
+actually entered with the request borrow held. The worker cancels this
+active VALUE call. The original local `CANCELLED` callback completes
+once; the worker verifies the **same Port credit stays occupied and
+`executing==1`** even after the cancelled terminal returns. The worker
+checks both old-N Scope releases, old generation drain and actual Plugin
+unload are BUSY, then invokes checked final cleanup **only on the already
+quiescent Scope-A Port**. The original N DSO-owned broken `restore_zero`
+returns `ORBIT_CALL_VALUE_CLEANUP_FAILED` and quarantines Scope A. The
+worker rechecks the *other* Port still owns its outstanding business borrow,
+both Scope obligations remain live and real N DSO getters still work.
+
+After the negative condition is proven, the worker releases Scope B's
+native business. The **original owner thread** resumes the generated Echo:
+its request remains the exact original deep-cloned bytes and its DSO getter
+still executes even though the local terminal already returned CANCELLED
+and sibling Scope A is quarantined. No duplicate SUCCESS is delivered.
+When the borrow returns, Scope B's healthy Port reaches zero occupied
+credits, stops/destroys normally and releases its own Scope. Scope A
+remains pinned; the old N Plugin still cannot drain or unload. N+1 remains
+healthy, runs its second generated Ping and fully unloads.
+
+**Critical isolation boundary:** Scope A's broken DSO descriptor is
+quiescent when its checked final restore is invoked. Scope B's live
+request uses a separately validated healthy generated managed VALUE
+contract. This test does **not** run the broken Provider's own restore
+during an executing slot's RECLAIMING phase, does not recover from
+malicious callback behavior, and does not permit premature destroy of the
+live borrowed Port. A violation during actual RECLAIMING still takes the
+existing **fail-stop** path, not successful recovery. It proves one exact
+two-Scopes / one-generation deterministic concurrent lifetime schedule,
+not arbitrary unsafe-code sandboxing or exhaustive model checking.
+
+The existing `orbit_scope_dso_native_test` executable is registered as a
+fifth isolated CTest invocation,
+`orbit.ace.dso_authored_old_borrow_quarantine`. No new test binary,
+workflow/job, installer/consumer/probe, Plugin module/export, Actor,
+scheduler, parser, ABI or code generator. Qualify only with **fresh**
+exact-HEAD Linux native Clang Debug+Release ACE/IDL **12/12** each,
+Core-only **5/5**, full-source Clang TSan ACE/IDL **12/12** and Windows
+x64 llvm-mingw/UCRT ACE/IDL **12/12**, Core-only **5/5**. All upstream
+SDK/source pins remain unchanged. The stacked PR chain stays
+Draft/unmerged/no release; Issue #24 stays OPEN.
+
+**Initial test-fixture RED:** first exact HEAD `5102dea3` failed only
+the added CTest's assertion that two old-N Scope guards imply
+`plugin_lifecycle.active_leases >= 2`. Upstream CMeta's
+`salts_service_host_scope_acquire` instead increments generation
+`active_scopes`; one generation may hold one Plugin registry lease while
+many Scopes remain live. Source fix `b3a85c4d` narrows the check to a
+positive registry lease and retains independent original Scope/drain
+BUSY assertions. No production code changed. Fresh exact-head CI is
+required; the first RED is not acceptance evidence.
