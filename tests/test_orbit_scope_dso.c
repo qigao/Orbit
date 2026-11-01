@@ -1083,8 +1083,97 @@ static void dso_fault_old_while_next_callback_held(void *user) {
     atomic_store(&probe->next_actor->release_terminal, true);
 }
 
+/*
+ * M0k.2p: one generation N, TWO independently minted original Scope
+ * guards. Scope A owns a quiescent but faulty original DSO DataDesc Port;
+ * Scope B owns a live generated managed Echo with an execution-borrow pin.
+ * Never bind two Actors to one Scope, and never try_destroy Scope B's Port
+ * while the borrowed native business request is executing.
+ *
+ * The worker cancels the actual live VALUE call, proves its request
+ * remains occupied/executing after the callback, then quarantines the
+ * separate already-quiescent Scope-A Port through N's DSO-owned broken
+ * BufferOps. Only after N remains pinned does business resume and invoke
+ * N's real DSO getter on its still-valid deep-cloned request bytes.
+ */
+typedef struct dso_owned_borrow_fault_probe {
+    dso_owned_actor *borrowed;
+    dso_actor *fault_owner;
+    orbit_ace_scope_guard *borrow_scope;
+    orbit_ace_scope_guard *fault_scope;
+    salts_service_host_runtime *runtime;
+    salts_service_host_generation *old_generation;
+    cmeta_plugin_registry *registry;
+    cmeta_plugin_ref original;
+    uint64_t token;
+    atomic_bool quarantined_while_borrowed;
+} dso_owned_borrow_fault_probe;
+
+static void dso_fault_during_old_managed_borrow(void *user) {
+    dso_owned_borrow_fault_probe *probe =
+        (dso_owned_borrow_fault_probe *)user;
+    orbit_call_port_stats stats = {0};
+    cmeta_plugin_lifecycle_info lifecycle = {0};
+    salts_service_host_status exact = SALTS_SERVICE_HOST_OK;
+    size_t checks = 0u;
+
+    while (!atomic_load(&probe->borrowed->receiver.native_entered) &&
+           checks++ < 10000u)
+        cmeta_sleep_ms(1u);
+    CHECK(atomic_load(&probe->borrowed->receiver.native_entered));
+    CHECK(orbit_call_port_get_stats(&probe->borrowed->port, &stats));
+    CHECK(stats.executing == 1u && stats.occupied == 1u &&
+          stats.callbacks_inflight == 0u);
+    CHECK(orbit_call_u64_cancel(
+        &probe->borrowed->port, probe->token) == ORBIT_CALL_OK);
+    CHECK(probe->borrowed->cancelled == 1u);
+    CHECK(orbit_call_u64_cancel(
+        &probe->borrowed->port, probe->token) == ORBIT_CALL_STALE);
+    CHECK(orbit_call_port_get_stats(&probe->borrowed->port, &stats));
+    CHECK(stats.executing == 1u && stats.occupied == 1u &&
+          stats.callbacks_inflight == 0u && stats.cancelled == 1u);
+
+    CHECK(orbit_ace_scope_guard_try_release(
+        probe->borrow_scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
+    CHECK(orbit_ace_scope_guard_try_release(
+        probe->fault_scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
+    CHECK(salts_service_host_generation_drain(
+        probe->runtime, probe->old_generation) == SALTS_SERVICE_HOST_BUSY);
+    CHECK(cmeta_plugin_registry_unload(
+        probe->registry, probe->original) == CMETA_PLUGIN_BUSY);
+    CHECK(cmeta_plugin_registry_get_lifecycle(
+        probe->registry, probe->original, &lifecycle) == CMETA_PLUGIN_OK);
+    CHECK(lifecycle.active_leases >= 2u);
+
+    /* Only the separate Scope A Actor was destroyed; its Port can be
+     * checked for faulty final teardown. Scope B's live borrowed Port
+     * may neither be destructed nor force-recycled by this worker.
+     */
+    CHECK(orbit_call_port_try_destroy(&probe->fault_owner->port) ==
+          ORBIT_CALL_VALUE_CLEANUP_FAILED);
+    CHECK(probe->fault_owner->port.impl != NULL);
+    CHECK(orbit_call_port_try_destroy(&probe->fault_owner->port) ==
+          ORBIT_CALL_VALUE_CLEANUP_FAILED);
+    CHECK(orbit_call_port_get_stats(&probe->borrowed->port, &stats));
+    CHECK(stats.executing == 1u && stats.occupied == 1u &&
+          stats.cancelled == 1u && stats.callbacks_inflight == 0u);
+    CHECK(actual_provider_value(probe->fault_scope) == 37);
+    CHECK(actual_provider_value(probe->borrow_scope) == 37);
+    CHECK(orbit_ace_scope_guard_try_release(
+        probe->borrow_scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
+    CHECK(orbit_ace_scope_guard_try_release(
+        probe->fault_scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
+    CHECK(salts_service_host_generation_drain(
+        probe->runtime, probe->old_generation) == SALTS_SERVICE_HOST_BUSY);
+    CHECK(cmeta_plugin_registry_unload(
+        probe->registry, probe->original) == CMETA_PLUGIN_BUSY);
+
+    atomic_store(&probe->quarantined_while_borrowed, true);
+    atomic_store(&probe->borrowed->receiver.release_native, true);
+}
+
 static void test_dso_quarantined_scope_on_failed_value_cleanup(
-    bool dso_authored, bool overlap) {
+    bool dso_authored, bool overlap, bool old_borrow_overlap) {
     const cmeta_plugin_registry_config config = {2u};
     orbit_call_value_contract contract = {
         UINT64_C(10), &dso_fault_desc, &dso_fault_desc, 32u, 32u
@@ -1097,7 +1186,9 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(
     salts_service_host_generation *previous = NULL;
     salts_service_host_status exact = SALTS_SERVICE_HOST_OK;
     orbit_ace_scope_guard n_scope = {0}, next_scope = {0};
+    orbit_ace_scope_guard borrow_scope = {0};
     dso_actor old_actor, new_actor;
+    dso_owned_actor borrowed_actor;
     orbit_call_port_stats stats = {0};
     cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
     PingRequest ping = {UINT64_C(5)}, next_ping = {UINT64_C(1)};
@@ -1105,6 +1196,8 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(
     bool quiet = false;
     cmeta_thread_t overlap_thread = NULL;
     dso_cleanup_overlap_probe overlap_probe = {0};
+    dso_owned_borrow_fault_probe borrow_fault_probe = {0};
+    cmeta_thread_t borrow_thread = NULL;
 
     atomic_init(&dso_fault_final_zero, false);
     atomic_init(&dso_fault_getter_hits, 0);
@@ -1159,6 +1252,22 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(
     CHECK(actual_provider_value(&n_scope) == 37);
     CHECK(orbit_ace_scope_guard_try_release(
         &n_scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
+    if (old_borrow_overlap) {
+        /* The original Scope has an exactly-one Actor+Port binding.
+         * Open a SECOND genuine Scope for the same old N ServiceHost
+         * generation rather than illegally rebinding n_scope.
+         */
+        CHECK(dso_authored && !overlap);
+        CHECK(orbit_ace_scope_guard_open(
+            &borrow_scope, &runtime, UINT64_C(21), &exact) ==
+              ORBIT_ACE_SCOPE_OK);
+        dso_owned_actor_start(&borrowed_actor, &borrow_scope, 37u);
+        CHECK(borrowed_actor.activation.source !=
+              old_actor.activation.source);
+        CHECK(actual_provider_value(&borrow_scope) == 37);
+        CHECK(orbit_ace_scope_guard_try_release(
+            &borrow_scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
+    }
 
     CHECK(salts_service_host_runtime_publish(
         &runtime, &next.generation, &previous) == SALTS_SERVICE_HOST_OK);
@@ -1200,7 +1309,83 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(
         &new_actor.port, &new_actor.producer, &ping, &new_actor.ping_context,
         dso_generated_ping_done, &new_actor, &token, &send) == ORBIT_CALL_OK);
     CHECK(token != 0u && send == CFLOW_ACTOR_SEND_ACCEPTED);
-    if (overlap) {
+    if (old_borrow_overlap) {
+        char original_label[] = "Room-A";
+        unsigned char original_bytes[] = {0u, 0xffu, 0x42u, 0x80u};
+        OwnedPacket scratch = {
+            {original_label, sizeof(original_label) - 1u},
+            {original_bytes, sizeof(original_bytes)}
+        };
+        OwnedPacket source = {0};
+        uint64_t borrow_token = 0u;
+
+        /* N+1's actual generated business runs before any N failure. */
+        dso_drive_until_callbacks(&new_actor, 1u);
+        CHECK(new_actor.first_result == UINT64_C(88));
+
+        /* Faulty Port is independently quiescent; the owning VALUE
+         * execution borrow in Scope B must remain active and pinned.
+         */
+        dso_actor_stop(&old_actor);
+        CHECK(orbit_call_port_get_stats(&old_actor.port, &stats));
+        CHECK(stats.closed && stats.admitted == 0u && stats.occupied == 0u);
+        CHECK(OwnedPacket_clone(&source, &scratch) == 0);
+        atomic_store(&borrowed_actor.receiver.hold_before_provider, true);
+        CHECK(databind_9_OwnedGame_4_Room_4_Echo__orbit_call_async(
+            &borrowed_actor.port, &borrowed_actor.producer,
+            &source, &borrowed_actor.context,
+            dso_owned_done, &borrowed_actor, &borrow_token, &send) ==
+              ORBIT_CALL_OK);
+        CHECK(send == CFLOW_ACTOR_SEND_ACCEPTED && borrow_token != 0u);
+        OwnedPacket_clear(&source);
+        original_label[0] = 'Z';
+        original_bytes[1] = 0x11u; /* input bytes cannot alias owned Port */
+
+        borrow_fault_probe.borrowed = &borrowed_actor;
+        borrow_fault_probe.fault_owner = &old_actor;
+        borrow_fault_probe.borrow_scope = &borrow_scope;
+        borrow_fault_probe.fault_scope = &n_scope;
+        borrow_fault_probe.runtime = &runtime;
+        borrow_fault_probe.old_generation = &n.generation;
+        borrow_fault_probe.registry = &registry;
+        borrow_fault_probe.original = original;
+        borrow_fault_probe.token = borrow_token;
+        atomic_init(&borrow_fault_probe.quarantined_while_borrowed, false);
+        CHECK(cmeta_thread_create(
+            &borrow_thread, dso_fault_during_old_managed_borrow,
+            &borrow_fault_probe) == 0);
+
+        /* The original CFlow owner thread executes the real generated
+         * owning method. It blocks with a borrowed request while worker
+         * CANCELS it and quarantines the distinct DSO-authored Port.
+         */
+        dso_owned_actor_run_until(&borrowed_actor, 1u);
+        CHECK(cmeta_thread_join(&borrow_thread) == 0);
+        CHECK(atomic_load(&borrow_fault_probe.quarantined_while_borrowed));
+        CHECK(borrowed_actor.successes == 0u &&
+              borrowed_actor.cancelled == 1u &&
+              borrowed_actor.receiver.invocations == 1u);
+        CHECK(borrowed_actor.last_marker == 0u);
+        CHECK(orbit_call_port_get_stats(&borrowed_actor.port, &stats));
+        CHECK(stats.executing == 0u && stats.occupied == 0u &&
+              stats.callbacks_inflight == 0u && stats.cancelled == 1u);
+        CHECK(orbit_call_u64_cancel(
+            &borrowed_actor.port, borrow_token) == ORBIT_CALL_STALE);
+
+        /* Healthy generated managed Port safely retires AFTER execution
+         * borrow returns. The independent old N faulty Scope never does.
+         */
+        dso_owned_actor_stop(&borrowed_actor);
+        CHECK(orbit_ace_scope_guard_try_release(
+            &borrow_scope, &exact) == ORBIT_ACE_SCOPE_OK);
+        CHECK(borrow_scope.impl == NULL);
+        CHECK(orbit_ace_scope_guard_try_release(
+            &n_scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
+        CHECK(salts_service_host_generation_drain(
+            &runtime, &n.generation) == SALTS_SERVICE_HOST_BUSY);
+        CHECK(cmeta_plugin_registry_unload(
+            &registry, original) == CMETA_PLUGIN_BUSY);
+    } else if (overlap) {
         CHECK(dso_authored);
         /* N must fully quiesce BEFORE its worker runs final cleanup.
          * The next generation's queued Ping remains independently valid.
@@ -1241,7 +1426,7 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(
      * worker in the overlap schedule, or directly by the owning main
      * thread in the original separate-process sequential schedule.
      */
-    if (!overlap) {
+    if (!overlap && !old_borrow_overlap) {
         if (!dso_authored)
             atomic_store(&dso_fault_final_zero, true);
         CHECK(orbit_call_port_try_destroy(&old_actor.port) ==
@@ -1323,17 +1508,22 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(
 
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--dso-cleanup-quarantine") == 0) {
-        test_dso_quarantined_scope_on_failed_value_cleanup(false, false);
+        test_dso_quarantined_scope_on_failed_value_cleanup(false, false, false);
         return 0;
     }
     if (argc == 2 &&
         strcmp(argv[1], "--dso-authored-cleanup-quarantine") == 0) {
-        test_dso_quarantined_scope_on_failed_value_cleanup(true, false);
+        test_dso_quarantined_scope_on_failed_value_cleanup(true, false, false);
         return 0;
     }
     if (argc == 2 &&
         strcmp(argv[1], "--dso-authored-callback-overlap") == 0) {
-        test_dso_quarantined_scope_on_failed_value_cleanup(true, true);
+        test_dso_quarantined_scope_on_failed_value_cleanup(true, true, false);
+        return 0;
+    }
+    if (argc == 2 &&
+        strcmp(argv[1], "--dso-authored-old-borrow-quarantine") == 0) {
+        test_dso_quarantined_scope_on_failed_value_cleanup(true, false, true);
         return 0;
     }
     CHECK(argc == 1);
