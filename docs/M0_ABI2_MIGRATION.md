@@ -105,4 +105,6 @@ claim of Windows or six-RID release qualification.
 Remote RPC, Streaming, managed-value request/reply, cross-process delivery,
 durable Directory and broader cross-thread race acceptance remain separate.
 No merge, release tag, new consumer project or new CI workflow is introduced.
-\n\nM0k.2l retains the exact CMeta package ABI but uses checked `cmeta_data_temp_try_close` from CMeta Draft #1340 to preserve a failed temporary and original Provider lease instead of incorrectly freeing incomplete cleanup.\n
+
+
+M0k.2l retains the exact CMeta package ABI but uses checked `cmeta_data_temp_try_close` from CMeta Draft #1340 to preserve a failed temporary and original Provider lease instead of incorrectly freeing incomplete cleanup.
