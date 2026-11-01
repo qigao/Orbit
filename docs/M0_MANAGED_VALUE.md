@@ -617,20 +617,30 @@ ServiceHost generations 21/22, real Provider N/N+1 DSOs, canonical CMeta
 CFlow Actor/CallPort/executor. No runtime scheduler, Plugin loader, ABI,
 test executable, workflow or consumer project is added.
 
-The N+1 Actor's genuine generated Ping terminal callback is held by an
-atomic handoff while its original CFlow executor runs on one native thread.
-The main test thread observes an **actual in-flight terminal credit**,
-checks N+1 Scope release and generation drain return BUSY and its real
-Plugin lease remains active, then stops old N's already-quiescent Actor and
-runs its *DSO-owned* deliberately faulty final CMeta `restore_zero` on the
-main thread. Old N's original CallPort is quarantined, Scope release,
-generation drain and real Plugin unload return BUSY, yet the **N+1 callback
-must remain active and N+1's independent Provider vtable callable throughout
-the faulty teardown**. Only after these checks does the main thread release
-the blocked callback, join the executor thread and verify its single
-successful terminal. N+1 must then execute a second generated Ping and
-ultimately drain/unload normally. Old N is never force-freed, and the
-negative test process exits with its deliberately pinned owner.
+The main thread retains **CFlow executor ownership** and first fully
+quiesces old N's original Actor, leaving its independent managed CallPort
+alive. It then enters N+1's genuine generated Ping terminal callback and
+holds its credit using an atomic handoff. The separate native worker waits
+for `terminal_entered`, checks the actual in-flight credit, N+1 Scope
+release and generation drain BUSY, and a positive live N+1 Plugin lease.
+While that callback is still blocked, the worker runs the checked final
+teardown of old N's *DSO-owned* faulty CMeta `restore_zero` and verifies
+that the old Port remains quarantined. N+1's own Scope must remain BUSY
+and its real Provider getter callable. After completing these checks,
+the worker releases the callback; the main owner-thread returns from the
+original executor, joins the worker and validates exactly one successful
+terminal. Old N Scope release, generation drain and real Plugin unload
+continue returning BUSY; N+1 must execute a second generated Ping, drain
+and unload normally. Old N is never force-freed; the isolated process
+exits with its deliberately pinned owner.
+
+The first CI run caught an incorrect test-only attempt to drive the
+thread-owned CFlow executor on a different native thread. That initial
+RED was a test choreography error, not proof of a production runtime
+defect. The corrected choreography keeps executor progress on its
+creating/owning thread and moves only the already-quiescent old Port's
+checked final teardown to the worker; qualification requires a fresh
+exact-HEAD run.
 
 This is a **deterministic partial-order schedule**, not a claim of exhaustive
 interleaving or arbitrary malicious C code isolation. It does not race
