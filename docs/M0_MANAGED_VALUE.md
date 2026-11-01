@@ -665,7 +665,10 @@ This test is **not** a second runtime, Provider ABI or recovery mechanism.
 It uses one original ServiceHost generation N with **two distinct, genuine
 Scope guards**, because `orbit_ace_scope_guard_activate_native` binds exactly
 one original Actor/CallPort per Scope. The two guards retain independent
-Scope/Port obligations for the same real N Plugin DSO.
+Scope/Port obligations for the same real N Plugin DSO. They each count
+toward the ServiceHost generation's `active_scopes`; this does **not**
+imply two separate Plugin registry `active_leases` (the original
+ServiceHost generation holds the registry lease).
 
 - Scope A owns the original N DSO-authored **broken** owning CMeta VALUE
   descriptor; its Actor is fully quiescent and destroyed before any final
@@ -721,3 +724,13 @@ Core-only **5/5**, full-source Clang TSan ACE/IDL **12/12** and Windows
 x64 llvm-mingw/UCRT ACE/IDL **12/12**, Core-only **5/5**. All upstream
 SDK/source pins remain unchanged. The stacked PR chain stays
 Draft/unmerged/no release; Issue #24 stays OPEN.
+
+**Initial test-fixture RED:** first exact HEAD `5102dea3` failed only
+the added CTest's assertion that two old-N Scope guards imply
+`plugin_lifecycle.active_leases >= 2`. Upstream CMeta's
+`salts_service_host_scope_acquire` instead increments generation
+`active_scopes`; one generation may hold one Plugin registry lease while
+many Scopes remain live. Source fix `b3a85c4d` narrows the check to a
+positive registry lease and retains independent original Scope/drain
+BUSY assertions. No production code changed. Fresh exact-head CI is
+required; the first RED is not acceptance evidence.
