@@ -925,7 +925,257 @@ static void test_managed_dso_lifecycle(void) {
     CHECK(cmeta_plugin_registry_destroy(&registry) == CMETA_PLUGIN_OK);
 }
 
-int main(void) {
+
+/*
+ * M0k.2m — real Plugin DSO lease and Scope during a BROKEN final CMeta
+ * no-fail Provider teardown. The original N DSO supplies the live
+ * generation-specific behavior. Only the malformed owning BufferOps is a
+ * test-local fixture: NO second DSO, Provider ABI or loader is invented.
+ * Run this mode in a separate invocation of this existing test executable,
+ * since the old N owner MUST remain quarantined and never be force-unloaded.
+ */
+typedef struct dso_fault_bytes {
+    unsigned char *data;
+    size_t size;
+} dso_fault_bytes;
+
+static const dso_room_receiver *dso_fault_receiver;
+static atomic_bool dso_fault_final_zero;
+static atomic_int dso_fault_getter_hits;
+
+static bool dso_fault_is_zero(const void *object) {
+    const dso_fault_bytes *value = (const dso_fault_bytes *)object;
+    if (atomic_load(&dso_fault_final_zero)) {
+        /* Unlike a mock lifetime counter, this dereferences the still-live
+         * vtable from the ACTUAL old N loaded Plugin DSO on final close.
+         */
+        CHECK(dso_fault_receiver != NULL);
+        CHECK(orbit_dso_value_get(&dso_fault_receiver->projected) == 37);
+        atomic_fetch_add(&dso_fault_getter_hits, 1);
+        return false; /* deliberate no-fail semantic-zero contract violation */
+    }
+    return value != NULL && value->data == NULL && value->size == 0u;
+}
+
+static cmeta_status dso_fault_init_zero(void *object) {
+    if (object == NULL) return CMETA_INVALID_ARGUMENT;
+    *(dso_fault_bytes *)object = (dso_fault_bytes){0};
+    return CMETA_OK;
+}
+static void dso_fault_restore_zero(void *object) {
+    dso_fault_bytes *value = (dso_fault_bytes *)object;
+    if (value == NULL) return;
+    free(value->data);
+    *value = (dso_fault_bytes){0};
+}
+static cmeta_status dso_fault_assign(
+    void *object, const unsigned char *data, size_t size, size_t bound) {
+    dso_fault_bytes *value = (dso_fault_bytes *)object;
+    unsigned char *copy;
+    if (!value || (size && !data) || !dso_fault_is_zero(value))
+        return CMETA_INVALID_ARGUMENT;
+    if (size > bound) return CMETA_CAPACITY_EXCEEDED;
+    if (size == 0u) return CMETA_OK;
+    copy = (unsigned char *)malloc(size);
+    if (!copy) return CMETA_OUT_OF_MEMORY;
+    memcpy(copy, data, size);
+    value->data = copy;
+    value->size = size;
+    return CMETA_OK;
+}
+static cmeta_status dso_fault_read(
+    const void *object, const unsigned char **out, size_t *length) {
+    const dso_fault_bytes *v = (const dso_fault_bytes *)object;
+    if (!v || !out || !length || (v->size != 0u && !v->data))
+        return CMETA_INVALID_ARGUMENT;
+    *out = v->data;
+    *length = v->size;
+    return CMETA_OK;
+}
+static void dso_fault_move(void *destination, void *source) {
+    dso_fault_bytes *dst = (dso_fault_bytes *)destination;
+    dso_fault_bytes *src = (dso_fault_bytes *)source;
+    CHECK(dst != NULL && src != NULL && dst != src && dso_fault_is_zero(dst));
+    *dst = *src;
+    *src = (dso_fault_bytes){0};
+}
+
+static const cmeta_type_identity dso_fault_identity =
+    CMETA_TYPE_ID_ATOM_INIT("orbit.test.dso.cleanup.quarantine.v1");
+static const cmeta_type_desc dso_fault_type = {
+    "dso_fault_bytes", sizeof(dso_fault_bytes),
+    CMETA_ALIGNOF(dso_fault_bytes), CMETA_T_OBJECT, NULL, NULL,
+    &dso_fault_identity
+};
+static const cmeta_data_buffer_shape dso_fault_shape = {
+    CMETA_DATA_BUFFER_OWNED
+};
+static const cmeta_data_buffer_ops dso_fault_ops = {
+    sizeof(cmeta_data_buffer_ops), CMETA_DATA_BUFFER_OPS_ABI_VERSION,
+    &dso_fault_type, CMETA_DATA_BUFFER_OWNED,
+    dso_fault_is_zero, dso_fault_assign, dso_fault_restore_zero,
+    dso_fault_read, dso_fault_init_zero, dso_fault_move
+};
+static const cmeta_data_desc dso_fault_desc = {
+    .struct_size = sizeof(cmeta_data_desc),
+    .abi_version = CMETA_DATA_DESC_ABI_VERSION,
+    .stable_id = "orbit.test.dso.cleanup.quarantine.v1",
+    .display_name = "dso_fault_bytes",
+    .kind = CMETA_DATA_BYTES,
+    .storage_type = &dso_fault_type,
+    .shape = &dso_fault_shape,
+    .buffer_ops = &dso_fault_ops
+};
+
+static void dso_drive_until_callbacks(dso_actor *actor, unsigned count) {
+    unsigned rounds = 0u;
+    while (actor->callbacks < count && rounds++ < 2048u)
+        (void)cflow_executor_run_one(&actor->executor);
+    CHECK(actor->callbacks == count && actor->errors == 0u);
+}
+
+static void test_dso_quarantined_scope_on_failed_value_cleanup(void) {
+    const cmeta_plugin_registry_config config = {2u};
+    const orbit_call_value_contract contract = {
+        UINT64_C(10), &dso_fault_desc, &dso_fault_desc, 32u, 32u
+    };
+    cmeta_plugin_registry registry = {0};
+    cmeta_plugin_ref original = {0}, successor = {0};
+    cmeta_plugin_lifecycle_info original_lifecycle = {0};
+    dso_generation n = {0}, next = {0};
+    salts_service_host_runtime runtime = SALTS_SERVICE_HOST_RUNTIME_INIT;
+    salts_service_host_generation *previous = NULL;
+    salts_service_host_status exact = SALTS_SERVICE_HOST_OK;
+    orbit_ace_scope_guard n_scope = {0}, next_scope = {0};
+    dso_actor old_actor, new_actor;
+    orbit_call_port_stats stats = {0};
+    cflow_actor_send_status send = CFLOW_ACTOR_SEND_INVALID_ARGUMENT;
+    PingRequest ping = {UINT64_C(5)}, next_ping = {UINT64_C(1)};
+    uint64_t token = 0u;
+    bool quiet = false;
+
+    atomic_init(&dso_fault_final_zero, false);
+    atomic_init(&dso_fault_getter_hits, 0);
+    CHECK(cmeta_plugin_registry_init(&registry, &config) == CMETA_PLUGIN_OK);
+    CHECK(cmeta_plugin_registry_load(
+        &registry, ORBIT_DSO_PROVIDER_N_PATH, &original) == CMETA_PLUGIN_OK);
+    CHECK(cmeta_plugin_registry_load(
+        &registry, ORBIT_DSO_PROVIDER_NEXT_PATH, &successor) == CMETA_PLUGIN_OK);
+    CHECK(cmeta_plugin_registry_start(&registry, original) == CMETA_PLUGIN_OK);
+    CHECK(cmeta_plugin_registry_start(&registry, successor) == CMETA_PLUGIN_OK);
+    build(&n, UINT64_C(21), &registry, original);
+    build(&next, UINT64_C(22), &registry, successor);
+    CHECK(salts_service_host_runtime_init(&runtime) == SALTS_SERVICE_HOST_OK);
+    CHECK(salts_service_host_runtime_publish(
+        &runtime, &n.generation, &previous) == SALTS_SERVICE_HOST_OK);
+    CHECK(previous == NULL);
+    CHECK(orbit_ace_scope_guard_open(
+        &n_scope, &runtime, UINT64_C(21), &exact) == ORBIT_ACE_SCOPE_OK);
+
+    /* Original Scope-minted receiver and original Actor/Port; the extra
+     * negative owning contract is test-only and no scalar business call
+     * is dispatched on old N's custom managed Port.
+     */
+    dso_actor_start_with_value(&old_actor, &n_scope, &contract);
+    dso_fault_receiver = &old_actor.receiver;
+    CHECK(actual_provider_value(&n_scope) == 37);
+    CHECK(orbit_ace_scope_guard_try_release(
+        &n_scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
+
+    CHECK(salts_service_host_runtime_publish(
+        &runtime, &next.generation, &previous) == SALTS_SERVICE_HOST_OK);
+    CHECK(previous == &n.generation);
+    CHECK(orbit_ace_scope_guard_open(
+        &next_scope, &runtime, UINT64_C(22), &exact) == ORBIT_ACE_SCOPE_OK);
+    dso_actor_start(&new_actor, &next_scope);
+    CHECK(actual_provider_value(&next_scope) == 83);
+    CHECK(cmeta_plugin_registry_request_stop(
+        &registry, original) == CMETA_PLUGIN_OK);
+
+    /* N+1 already executes through its actual own DSO before old-N
+     * quarantine, establishing a live independent published generation.
+     */
+    CHECK(databind_4_Game_4_Room_4_Ping__orbit_call_async(
+        &new_actor.port, &new_actor.producer, &ping, &new_actor.ping_context,
+        dso_generated_ping_done, &new_actor, &token, &send) == ORBIT_CALL_OK);
+    CHECK(token != 0u && send == CFLOW_ACTOR_SEND_ACCEPTED);
+    dso_drive_until_callbacks(&new_actor, 1u);
+    CHECK(new_actor.first_result == UINT64_C(88));
+
+    dso_actor_stop(&old_actor); /* Actor destroyed, real Port still lives */
+    CHECK(orbit_call_port_get_stats(&old_actor.port, &stats));
+    CHECK(stats.closed && stats.admitted == 0u && stats.occupied == 0u);
+    CHECK(stats.executing == 0u && stats.callbacks_inflight == 0u);
+
+    /* The original CMeta temp-close calls an actual N DSO vtable from its
+     * intentionally broken no-fail postcondition. Its original DSO MUST
+     * remain live, not be freed by a spurious Port destruction success.
+     */
+    atomic_store(&dso_fault_final_zero, true);
+    CHECK(orbit_call_port_try_destroy(&old_actor.port) ==
+          ORBIT_CALL_VALUE_CLEANUP_FAILED);
+    CHECK(old_actor.port.impl != NULL);
+    CHECK(atomic_load(&dso_fault_getter_hits) >= 1);
+    CHECK(orbit_call_port_try_destroy(&old_actor.port) ==
+          ORBIT_CALL_VALUE_CLEANUP_FAILED);
+    CHECK(orbit_call_port_get_stats(&old_actor.port, &stats));
+    CHECK(stats.closed && stats.occupied == 0u);
+    CHECK(orbit_ace_scope_guard_try_release(
+        &n_scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
+    CHECK(salts_service_host_generation_drain(
+        &runtime, &n.generation) == SALTS_SERVICE_HOST_BUSY);
+    CHECK(cmeta_plugin_registry_unload(
+        &registry, original) == CMETA_PLUGIN_BUSY);
+    CHECK(cmeta_plugin_registry_get_lifecycle(
+        &registry, original, &original_lifecycle) == CMETA_PLUGIN_OK);
+    CHECK(original_lifecycle.active_leases >= 1u);
+    CHECK(actual_provider_value(&n_scope) == 37); /* N still loaded */
+
+    /* Even the quarantined old generation cannot retarget the N+1 Actor.
+     * A second genuine generated call still uses N+1's own real DSO.
+     */
+    token = 0u;
+    CHECK(databind_4_Game_4_Room_4_Ping__orbit_call_async(
+        &new_actor.port, &new_actor.producer, &next_ping,
+        &new_actor.ping_context, dso_generated_ping_done,
+        &new_actor, &token, &send) == ORBIT_CALL_OK);
+    CHECK(token != 0u && send == CFLOW_ACTOR_SEND_ACCEPTED);
+    dso_drive_until_callbacks(&new_actor, 2u);
+    CHECK(new_actor.first_result == UINT64_C(84));
+    CHECK(new_actor.receiver.invocations == 2u);
+
+    /* N+1 can retire normally. N must NEVER be force-released and cannot
+     * leave this test process. The process boundary isolates that owner.
+     */
+    dso_actor_stop(&new_actor);
+    CHECK(orbit_call_port_try_destroy(&new_actor.port) == ORBIT_CALL_OK);
+    CHECK(orbit_ace_scope_guard_try_release(
+        &next_scope, &exact) == ORBIT_ACE_SCOPE_OK);
+    CHECK(salts_service_host_runtime_close(
+        &runtime, &previous) == SALTS_SERVICE_HOST_OK);
+    CHECK(previous == &next.generation);
+    CHECK(salts_service_host_generation_drain(
+        &runtime, &next.generation) == SALTS_SERVICE_HOST_OK);
+    CHECK(cmeta_plugin_registry_request_stop(
+        &registry, successor) == CMETA_PLUGIN_OK);
+    CHECK(cmeta_plugin_registry_poll_quiescent(
+        &registry, successor, &quiet) == CMETA_PLUGIN_OK);
+    CHECK(quiet);
+    CHECK(cmeta_plugin_registry_unload(
+        &registry, successor) == CMETA_PLUGIN_OK);
+
+    /* Do not release old Scope/registry or free a no-fail-violating
+     * descriptor; this isolated process exits with N quarantined.
+     */
+    CHECK(old_actor.port.impl != NULL && n_scope.impl != NULL);
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--dso-cleanup-quarantine") == 0) {
+        test_dso_quarantined_scope_on_failed_value_cleanup();
+        return 0;
+    }
+    CHECK(argc == 1);
     const cmeta_plugin_registry_config registry_config = {2u};
     cmeta_plugin_registry registry = {0};
     cmeta_plugin_ref original = {0};
