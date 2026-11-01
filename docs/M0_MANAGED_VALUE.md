@@ -443,3 +443,59 @@ instrumented Linux TSan and current immutable CMeta/Core/salts-idlc host
 provenance. No new test executable, workflow, CMake probe, installer,
 consumer, Provider loader, runtime queue or fallback. **Do not claim
 M0k.2j complete or merge until the new exact PR HEAD has passed.**
+
+## M0k.2l — checked CMeta temporary teardown, fail-stop vs quarantine
+
+**Upstream source owner:** [CMeta Draft #1340](https://github.com/qigao/cmeta/pull/1340)
+HEAD `c711c378ca450d1261da619980281f4279033cf6`.
+This is the exact installed CMeta SDK source pinned by the **existing**
+Linux Clang / Windows llvm-mingw workflow, not a second CMeta implementation
+linked next to an older package.
+
+There are **three distinct failure boundaries**:
+
+1. **Ordinary request/response copy failure** is recoverable *only if* the
+   original CMeta owning-value rollback/restore succeeds. Pre-admission
+   failure leaves no accepted token/callback; accepted reply copy failure
+   returns one NO_REPLY and subsequent capacity may be reused. Existing
+   M0k.2a/e/f/g fixtures verify these routes.
+2. **A broken no-fail Provider restore during LIVE slot reclamation** is a
+   fatal in-progress lifecycle invariant: the original `RECLAIMING` slot
+   is never transitioned to `FREE`; `orbit_call_reclaim_slot` attempts
+   both restore operations and deliberately aborts on non-OK. No inferred
+   retry, second cleanup provider or forced slot recycle is permitted.
+3. **A broken no-fail Provider during FINAL Port teardown** occurs only
+   after the original Actor, callbacks, admission and execution borrows
+   have all been quiesced. The Port now calls CMeta's
+   `cmeta_data_temp_try_close` for each original owned temporary.
+   When any cleanup is non-OK it returns
+   `ORBIT_CALL_VALUE_CLEANUP_FAILED` and **permanently quarantines** the
+   original Port/catalog/provider owner without freeing the failed
+   temporary, releasing its retained CFlow producer identity or allowing
+   its original ServiceHost Scope/Plugin to unload. A later
+   `try_destroy` returns the same error with **no implicit retry**.
+   Operator process restart/fail-stop remains the terminal policy; this
+   is containment, not a promise that arbitrary hostile Provider code
+   can be repaired in place.
+
+The original `orbit.ace.scope_guard_try_release` stays BUSY while this
+quarantined CallPort handle is live; this is intentional and preserves the
+DSO code that owns the invalid native-value descriptor. Production callers
+must NOT drop the failed Port's address-stable ServiceHost owner storage
+or attempt native free/Plugin unload after a failed teardown.
+
+The **same existing `orbit_call_native_test` executable** now has one
+separate negative CTest invocation,
+`orbit.core.cleanup_quarantine`, which injects a deliberately malformed
+test-only CMeta BufferOps-v2 is_zero/restore postcondition *only during final
+teardown*, after the real CFlow Actor is destroyed. It proves the returned
+cleanup error, permanent rejection of repeated destroy and retention of
+the original live Port/owner. Its isolated test process exits with the
+quarantine deliberately intact, because freeing it would defeat the
+safety contract. This adds **no new executable/project or CI workflow**.
+
+The exact full cross-platform Clang/llvm-mingw and Linux full-source TSan
+CI on this new HEAD must still pass. Existing generated scalar and managed
+N/N+1 real DSO cancellation, old Provider unload and live N+1 continuation
+remain a separate mandatory acceptance. No general nested/nullable VALUE,
+remote H2/Streaming, durable COMMIT/ACK or exhaustive scheduler proof.
