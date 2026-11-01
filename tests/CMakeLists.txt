@@ -66,6 +66,11 @@ if(ORBIT_BUILD_ACE)
     # Faulty owners intentionally remain quarantined at process exit.
     add_test(NAME orbit.ace.dso_authored_cleanup_quarantine
       COMMAND orbit_scope_dso_native_test --dso-authored-cleanup-quarantine)
+    # M0k.2o: deterministic two-native-thread schedule in the SAME real
+    # DSO CTest executable. Hold the N+1 generated terminal callback while
+    # the original N DSO-authored faulty CMeta teardown is quarantined.
+    add_test(NAME orbit.ace.dso_authored_callback_overlap
+      COMMAND orbit_scope_dso_native_test --dso-authored-callback-overlap)
   endif()
 endif()
 

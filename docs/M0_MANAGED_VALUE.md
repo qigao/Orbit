@@ -606,3 +606,55 @@ The *new exact HEAD* must run the original Linux Clang Debug/Release
 ACE+IDL, Core-only, full-source TSan and Windows llvm-mingw ACE+IDL
 graphs before this Draft can claim qualification. No extra CTest
 executable, workflow, independent CI project or consumer/installer test.
+
+## M0k.2o deterministic real DSO authored teardown / N+1 callback overlap
+
+The existing original `orbit_scope_dso_native_test` is invoked in a fourth,
+**separate-process** CTest mode
+`orbit.ace.dso_authored_callback_overlap`. It reuses the exact original
+ServiceHost generations 21/22, real Provider N/N+1 DSOs, canonical CMeta
+`ObjectRef.data` descriptors authored within those modules, and the same
+CFlow Actor/CallPort/executor. No runtime scheduler, Plugin loader, ABI,
+test executable, workflow or consumer project is added.
+
+The main thread retains **CFlow executor ownership** and first fully
+quiesces old N's original Actor, leaving its independent managed CallPort
+alive. It then enters N+1's genuine generated Ping terminal callback and
+holds its credit using an atomic handoff. The separate native worker waits
+for `terminal_entered`, checks the actual in-flight credit, N+1 Scope release BUSY, and a
+positive live N+1 Plugin lease. It does NOT attempt to drain the currently
+published N+1 generation (that operation is tested only after runtime_close).
+While that callback is still blocked, the worker runs the checked final
+teardown of old N's *DSO-owned* faulty CMeta `restore_zero` and verifies
+that the old Port remains quarantined. N+1's own Scope must remain BUSY
+and its real Provider getter callable. After completing these checks,
+the worker releases the callback; the main owner-thread returns from the
+original executor, joins the worker and validates exactly one successful
+terminal. Old N Scope release, generation drain and real Plugin unload
+continue returning BUSY; N+1 must execute a second generated Ping, drain
+and unload normally. Old N is never force-freed; the isolated process
+exits with its deliberately pinned owner.
+
+The first CI run caught an incorrect test-only attempt to drive the
+thread-owned CFlow executor on a different native thread. That initial
+RED was a test choreography error, not proof of a production runtime
+defect.
+A second exact-HEAD CTest RED exposed a test-only invalid expectation:
+`generation_drain` was invoked on the still-published N+1 generation and
+required BUSY. The schedule now verifies the correct live Scope/Plugin
+lease obligations instead and leaves N+1 drain for its normal post-close
+sequence. Neither failure is a passed acceptance gate. The corrected choreography keeps executor progress on its
+creating/owning thread and moves only the already-quiescent old Port's
+checked final teardown to the worker; qualification requires a fresh
+exact-HEAD run.
+
+This is a **deterministic partial-order schedule**, not a claim of exhaustive
+interleaving or arbitrary malicious C code isolation. It does not race
+`try_destroy` against an in-flight *old N* managed business borrow, does not
+attempt recovery after a broken live RECLAIMING no-fail callback, and does
+not support unsupported nested/nullable VALUE shapes. Both previously
+qualified sequential modes remain separate. The exact new HEAD must pass
+Linux Clang Debug/Release ACE+IDL **11/11**, Core **5/5**, full-source
+Clang TSan **11/11**, and Windows llvm-mingw/UCRT ACE+IDL **11/11** plus
+Core **5/5** before it can be treated as qualified. This is not release
+authorization; the entire stacked PR chain remains Draft.

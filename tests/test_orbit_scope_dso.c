@@ -1034,8 +1034,57 @@ static void dso_drive_until_callbacks(dso_actor *actor, unsigned count) {
     CHECK(actor->callbacks == count && actor->errors == 0u);
 }
 
+/*
+ * M0k.2o: preserve CFlow's owner-thread executor contract. The MAIN thread
+ * drives the real N+1 callback; a separate native worker can only tear down
+ * the ALREADY-QUIESCENT old N CallPort (not drive another owner's executor).
+ * A positive atomic handoff proves the old DSO fault occurs while N+1 holds
+ * a genuine generated terminal callback credit.
+ */
+typedef struct dso_cleanup_overlap_probe {
+    dso_actor *next_actor;
+    dso_actor *old_actor;
+    orbit_ace_scope_guard *next_scope;
+    cmeta_plugin_registry *registry;
+    cmeta_plugin_ref successor;
+    atomic_bool quarantined;
+} dso_cleanup_overlap_probe;
+
+static void dso_fault_old_while_next_callback_held(void *user) {
+    dso_cleanup_overlap_probe *probe = (dso_cleanup_overlap_probe *)user;
+    orbit_call_port_stats stats = {0};
+    cmeta_plugin_lifecycle_info lifecycle = {0};
+    salts_service_host_status exact = SALTS_SERVICE_HOST_OK;
+    size_t checks = 0u;
+    while (!atomic_load(&probe->next_actor->terminal_entered) &&
+           checks++ < 10000u)
+        cmeta_sleep_ms(1u);
+    CHECK(atomic_load(&probe->next_actor->terminal_entered));
+    CHECK(orbit_call_port_get_stats(&probe->next_actor->port, &stats));
+    CHECK(stats.callbacks_inflight == 1u && stats.occupied == 1u);
+    CHECK(orbit_ace_scope_guard_try_release(
+        probe->next_scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
+    CHECK(cmeta_plugin_registry_get_lifecycle(
+        probe->registry, probe->successor, &lifecycle) == CMETA_PLUGIN_OK);
+    CHECK(lifecycle.active_leases >= 1u);
+
+    /* The original N Actor is already destroyed. Its independent Port is
+     * safe for checked final teardown; the DSO-owned fault is deliberate.
+     */
+    CHECK(orbit_call_port_try_destroy(&probe->old_actor->port) ==
+          ORBIT_CALL_VALUE_CLEANUP_FAILED);
+    CHECK(probe->old_actor->port.impl != NULL);
+    CHECK(orbit_call_port_get_stats(&probe->next_actor->port, &stats));
+    CHECK(stats.callbacks_inflight == 1u && stats.occupied == 1u);
+    CHECK(orbit_ace_scope_guard_try_release(
+        probe->next_scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
+    CHECK(actual_provider_value(probe->next_scope) == 83);
+    atomic_store(&probe->quarantined, true);
+    atomic_store(&probe->next_actor->release_terminal, true);
+}
+
 static void test_dso_quarantined_scope_on_failed_value_cleanup(
-    bool dso_authored) {
+    bool dso_authored, bool overlap) {
     const cmeta_plugin_registry_config config = {2u};
     orbit_call_value_contract contract = {
         UINT64_C(10), &dso_fault_desc, &dso_fault_desc, 32u, 32u
@@ -1054,6 +1103,8 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(
     PingRequest ping = {UINT64_C(5)}, next_ping = {UINT64_C(1)};
     uint64_t token = 0u;
     bool quiet = false;
+    cmeta_thread_t overlap_thread = NULL;
+    dso_cleanup_overlap_probe overlap_probe = {0};
 
     atomic_init(&dso_fault_final_zero, false);
     atomic_init(&dso_fault_getter_hits, 0);
@@ -1149,22 +1200,53 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(
         &new_actor.port, &new_actor.producer, &ping, &new_actor.ping_context,
         dso_generated_ping_done, &new_actor, &token, &send) == ORBIT_CALL_OK);
     CHECK(token != 0u && send == CFLOW_ACTOR_SEND_ACCEPTED);
-    dso_drive_until_callbacks(&new_actor, 1u);
-    CHECK(new_actor.first_result == UINT64_C(88));
-
-    dso_actor_stop(&old_actor); /* Actor destroyed, real Port still lives */
+    if (overlap) {
+        CHECK(dso_authored);
+        /* N must fully quiesce BEFORE its worker runs final cleanup.
+         * The next generation's queued Ping remains independently valid.
+         */
+        dso_actor_stop(&old_actor);
+        CHECK(orbit_call_port_get_stats(&old_actor.port, &stats));
+        CHECK(stats.closed && stats.admitted == 0u && stats.occupied == 0u);
+        CHECK(stats.executing == 0u && stats.callbacks_inflight == 0u);
+        overlap_probe.next_actor = &new_actor;
+        overlap_probe.old_actor = &old_actor;
+        overlap_probe.next_scope = &next_scope;
+        overlap_probe.registry = &registry;
+        overlap_probe.successor = successor;
+        atomic_init(&overlap_probe.quarantined, false);
+        atomic_store(&new_actor.hold_terminal, true);
+        CHECK(cmeta_thread_create(
+            &overlap_thread, dso_fault_old_while_next_callback_held,
+            &overlap_probe) == 0);
+        /* CFlow executor stays on its original main owner thread. Its
+         * callback blocks until the other thread quarantines N's Port.
+         */
+        dso_drive_until_callbacks(&new_actor, 1u);
+        CHECK(cmeta_thread_join(&overlap_thread) == 0);
+        CHECK(atomic_load(&overlap_probe.quarantined));
+        CHECK(new_actor.first_result == UINT64_C(88));
+        atomic_store(&new_actor.hold_terminal, false);
+    } else {
+        dso_drive_until_callbacks(&new_actor, 1u);
+        CHECK(new_actor.first_result == UINT64_C(88));
+        dso_actor_stop(&old_actor);
+    }
+    /* Actor destroyed, real Port still lives and is independently pinned. */
     CHECK(orbit_call_port_get_stats(&old_actor.port, &stats));
     CHECK(stats.closed && stats.admitted == 0u && stats.occupied == 0u);
     CHECK(stats.executing == 0u && stats.callbacks_inflight == 0u);
 
-    /* The original CMeta temp-close calls an actual N DSO vtable from its
-     * intentionally broken no-fail postcondition. Its original DSO MUST
-     * remain live, not be freed by a spurious Port destruction success.
+    /* A broken DSO-owned restore is performed by the synchronized native
+     * worker in the overlap schedule, or directly by the owning main
+     * thread in the original separate-process sequential schedule.
      */
-    if (!dso_authored)
-        atomic_store(&dso_fault_final_zero, true);
-    CHECK(orbit_call_port_try_destroy(&old_actor.port) ==
-          ORBIT_CALL_VALUE_CLEANUP_FAILED);
+    if (!overlap) {
+        if (!dso_authored)
+            atomic_store(&dso_fault_final_zero, true);
+        CHECK(orbit_call_port_try_destroy(&old_actor.port) ==
+              ORBIT_CALL_VALUE_CLEANUP_FAILED);
+    }
     CHECK(old_actor.port.impl != NULL);
     if (dso_authored) {
         /* The host-local fixture is OFF. Only the actual original N DSO
@@ -1189,6 +1271,16 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(
         &registry, original, &original_lifecycle) == CMETA_PLUGIN_OK);
     CHECK(original_lifecycle.active_leases >= 1u);
     CHECK(actual_provider_value(&n_scope) == 37); /* N still loaded */
+
+    if (overlap) {
+        /* N+1 has emitted one genuine terminal and joined its teardown
+         * witness; old N has not been force released or recovered.
+         */
+        CHECK(atomic_load(&overlap_probe.quarantined));
+        CHECK(new_actor.callbacks == 1u && new_actor.errors == 0u);
+        CHECK(new_actor.first_result == UINT64_C(88));
+        CHECK(actual_provider_value(&next_scope) == 83);
+    }
 
     /* Even the quarantined old generation cannot retarget the N+1 Actor.
      * A second genuine generated call still uses N+1's own real DSO.
@@ -1231,12 +1323,17 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(
 
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--dso-cleanup-quarantine") == 0) {
-        test_dso_quarantined_scope_on_failed_value_cleanup(false);
+        test_dso_quarantined_scope_on_failed_value_cleanup(false, false);
         return 0;
     }
     if (argc == 2 &&
         strcmp(argv[1], "--dso-authored-cleanup-quarantine") == 0) {
-        test_dso_quarantined_scope_on_failed_value_cleanup(true);
+        test_dso_quarantined_scope_on_failed_value_cleanup(true, false);
+        return 0;
+    }
+    if (argc == 2 &&
+        strcmp(argv[1], "--dso-authored-callback-overlap") == 0) {
+        test_dso_quarantined_scope_on_failed_value_cleanup(true, true);
         return 0;
     }
     CHECK(argc == 1);
