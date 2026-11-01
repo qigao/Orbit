@@ -1045,8 +1045,6 @@ typedef struct dso_cleanup_overlap_probe {
     dso_actor *next_actor;
     dso_actor *old_actor;
     orbit_ace_scope_guard *next_scope;
-    salts_service_host_runtime *runtime;
-    salts_service_host_generation *next_generation;
     cmeta_plugin_registry *registry;
     cmeta_plugin_ref successor;
     atomic_bool quarantined;
@@ -1066,8 +1064,6 @@ static void dso_fault_old_while_next_callback_held(void *user) {
     CHECK(stats.callbacks_inflight == 1u && stats.occupied == 1u);
     CHECK(orbit_ace_scope_guard_try_release(
         probe->next_scope, &exact) == ORBIT_ACE_SCOPE_BUSY);
-    CHECK(salts_service_host_generation_drain(
-        probe->runtime, probe->next_generation) == SALTS_SERVICE_HOST_BUSY);
     CHECK(cmeta_plugin_registry_get_lifecycle(
         probe->registry, probe->successor, &lifecycle) == CMETA_PLUGIN_OK);
     CHECK(lifecycle.active_leases >= 1u);
@@ -1216,8 +1212,6 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(
         overlap_probe.next_actor = &new_actor;
         overlap_probe.old_actor = &old_actor;
         overlap_probe.next_scope = &next_scope;
-        overlap_probe.runtime = &runtime;
-        overlap_probe.next_generation = &next.generation;
         overlap_probe.registry = &registry;
         overlap_probe.successor = successor;
         atomic_init(&overlap_probe.quarantined, false);
