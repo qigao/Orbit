@@ -57,7 +57,12 @@ typedef enum orbit_call_status {
     ORBIT_CALL_NO_REPLY,
     ORBIT_CALL_BUSY,
     ORBIT_CALL_VALUE_TOO_LARGE,
-    ORBIT_CALL_VALUE_COPY_FAILED
+    ORBIT_CALL_VALUE_COPY_FAILED,
+    /* A no-fail CMeta cleanup contract was violated during final teardown.
+     * The Port, its original owned storage and Provider/Scope obligation
+     * remain live. It must not be discarded/retried automatically.
+     */
+    ORBIT_CALL_VALUE_CLEANUP_FAILED
 } orbit_call_status;
 
 typedef enum orbit_call_terminal {
@@ -205,6 +210,15 @@ bool orbit_call_port_get_stats(
  * is actually destroyed; a mere call-port close is not actor quiescence.
  * This does not unload/retain a Plugin; keep its ServiceHost Scope alive
  * through Actor and call-port destruction, then release the Scope.
+ *
+ * On final CMeta temporary cleanup failure, returns
+ * ORBIT_CALL_VALUE_CLEANUP_FAILED and deliberately retains the live Port,
+ * failed temporary VALUE, original native owner catalog/Provider and Scope
+ * obligation. The Port remains permanently sealed and may not be recycled,
+ * force-freed or treated as a successful teardown. This is owner-level
+ * quarantine of a BROKEN no-fail Provider, not automatic recovery.
+ * An ordinary deep-copy failure before/after admission remains a separate
+ * recoverable error if the canonical restore succeeded.
  */
 orbit_call_status orbit_call_port_try_destroy(orbit_call_port *port);
 
