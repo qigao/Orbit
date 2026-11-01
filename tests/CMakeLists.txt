@@ -55,6 +55,11 @@ if(ORBIT_BUILD_ACE)
     add_dependencies(orbit_scope_dso_native_test
       orbit_dso_provider_n orbit_dso_provider_next)
     add_test(NAME orbit.ace.dso_native COMMAND orbit_scope_dso_native_test)
+    # Same exact native DSO test executable; isolated process MUST retain
+    # a quarantined old Provider/Scope when final CMeta temp cleanup fails.
+    # This is an owner-lifetime negative mode, not another SDK or loader.
+    add_test(NAME orbit.ace.dso_cleanup_quarantine
+      COMMAND orbit_scope_dso_native_test --dso-cleanup-quarantine)
   endif()
 endif()
 
