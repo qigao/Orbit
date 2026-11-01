@@ -621,8 +621,9 @@ The main thread retains **CFlow executor ownership** and first fully
 quiesces old N's original Actor, leaving its independent managed CallPort
 alive. It then enters N+1's genuine generated Ping terminal callback and
 holds its credit using an atomic handoff. The separate native worker waits
-for `terminal_entered`, checks the actual in-flight credit, N+1 Scope
-release and generation drain BUSY, and a positive live N+1 Plugin lease.
+for `terminal_entered`, checks the actual in-flight credit, N+1 Scope release BUSY, and a
+positive live N+1 Plugin lease. It does NOT attempt to drain the currently
+published N+1 generation (that operation is tested only after runtime_close).
 While that callback is still blocked, the worker runs the checked final
 teardown of old N's *DSO-owned* faulty CMeta `restore_zero` and verifies
 that the old Port remains quarantined. N+1's own Scope must remain BUSY
@@ -637,7 +638,12 @@ exits with its deliberately pinned owner.
 The first CI run caught an incorrect test-only attempt to drive the
 thread-owned CFlow executor on a different native thread. That initial
 RED was a test choreography error, not proof of a production runtime
-defect. The corrected choreography keeps executor progress on its
+defect.
+A second exact-HEAD CTest RED exposed a test-only invalid expectation:
+`generation_drain` was invoked on the still-published N+1 generation and
+required BUSY. The schedule now verifies the correct live Scope/Plugin
+lease obligations instead and leaves N+1 drain for its normal post-close
+sequence. Neither failure is a passed acceptance gate. The corrected choreography keeps executor progress on its
 creating/owning thread and moves only the already-quiescent old Port's
 checked final teardown to the worker; qualification requires a fresh
 exact-HEAD run.
