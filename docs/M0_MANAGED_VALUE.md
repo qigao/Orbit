@@ -546,3 +546,63 @@ quiescent final teardown, not recoverable. In-progress RECLAIMING
 cleanup violations still abort. The test cannot prove every possible
 concurrent schedule, runtime isolation from malicious native source,
 remote RPC, Streaming or persistent business COMMIT/ACK.
+
+## M0k.2n original DSO-authored CMeta VALUE cleanup contract violation
+
+This is a separate, stricter **provider-code provenance** witness beyond
+M0k.2m's host-defined malformed BufferOps that merely invoked the original
+Plugin DSO vtable. The same original `orbit_dso_provider_n` and
+`orbit_dso_provider_next` Plugin fixture DSOs now author and retain their
+**own native CMeta VALUE DataDesc, type/field metadata and BufferOps-v2
+function pointer table inside the modules**. No second Provider Interface,
+Plugin export, dynamic loader, generator, shadow reflection engine or ABI
+is introduced. The existing strict-FR0 `orbit_dso_value` methods stay intact.
+
+Each Component's canonical `cmeta_object_ref.data` describes a complete
+provider state record (the original scalar value plus a test-only owning
+byte field), obtained through **the original live ServiceHost Scope**
+using `orbit_ace_scope_guard_find_service`. The old-N module deliberately
+breaks its no-fail `restore_zero` postcondition by leaving the owned byte
+value outside semantic zero after clearing it. The N+1 module has the
+same semantically identified CMeta VALUE schema but a correct no-fail
+restore. This is controlled test-source fault injection *inside* one
+real Plugin DSO, not arbitrary untrusted native code isolation.
+
+The existing `orbit_scope_dso_native_test` executable adds only a
+distinct **`--dso-authored-cleanup-quarantine` process invocation**
+to the existing CTest graph. The original healthy N/N+1 generated
+scalar+managed Room acceptance and the previous test-local
+`--dso-cleanup-quarantine` both remain separate unchanged modes.
+
+The new negative mode acquires the exact **N DSO-authored** descriptor
+from that Scope's original `ObjectRef`, then binds it to the original
+bounded managed CallPort before any Producer is published. A real N+1
+Scope supplies its independently owned, semantically identical
+descriptor; a CMeta native temporary using that descriptor is opened
+and closed successfully. N+1 genuinely executes generated Ping against
+its original DSO vtable before and after the fault.
+
+After old N's Actor has stopped/destroyed and its Port has no accepted
+credit or business borrow, the Core calls CMeta's checked final
+`cmeta_data_temp_try_close` on N's **module-owned** descriptor, which
+dispatches to the actual N DSO's broken no-fail BufferOps. It must return
+`ORBIT_CALL_VALUE_CLEANUP_FAILED`, retain the original Port and DataDesc,
+reject repeat destroy, refuse original Scope release, report original
+generation drain BUSY and actual Plugin unload BUSY. The old N code
+remains callable; N+1's healthy generation can drain and unload even
+while N is quarantined. No crash, forced unload or synthetic recovery
+may be interpreted as PASS.
+
+**Precise limitation:** the failing DSO owns the actual DataDesc and
+callback code, but the test uses one deliberately invalid, cooperatively
+written Plugin fixture. It is not a security sandbox for malicious
+native Provider code, does not guarantee safe recovery from arbitrary
+callback corruption/reentrancy, and does not test full generated managed
+traffic with the faulty descriptor. In-progress RECLAIMING cleanup failure
+remains a fail-stop path rather than late slot recycle. The single
+canonical IDL/FunctionAbi and CFlow post-commit model remain unchanged.
+
+The *new exact HEAD* must run the original Linux Clang Debug/Release
+ACE+IDL, Core-only, full-source TSan and Windows llvm-mingw ACE+IDL
+graphs before this Draft can claim qualification. No extra CTest
+executable, workflow, independent CI project or consumer/installer test.

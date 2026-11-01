@@ -60,6 +60,12 @@ if(ORBIT_BUILD_ACE)
     # This is an owner-lifetime negative mode, not another SDK or loader.
     add_test(NAME orbit.ace.dso_cleanup_quarantine
       COMMAND orbit_scope_dso_native_test --dso-cleanup-quarantine)
+    # A THIRD invocation of that very same native test executable. Here
+    # the faulty owning DataDesc and its BufferOps callbacks live INSIDE
+    # the original N Provider DSO, not in a host-side test fixture.
+    # Faulty owners intentionally remain quarantined at process exit.
+    add_test(NAME orbit.ace.dso_authored_cleanup_quarantine
+      COMMAND orbit_scope_dso_native_test --dso-authored-cleanup-quarantine)
   endif()
 endif()
 

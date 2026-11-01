@@ -1034,9 +1034,10 @@ static void dso_drive_until_callbacks(dso_actor *actor, unsigned count) {
     CHECK(actor->callbacks == count && actor->errors == 0u);
 }
 
-static void test_dso_quarantined_scope_on_failed_value_cleanup(void) {
+static void test_dso_quarantined_scope_on_failed_value_cleanup(
+    bool dso_authored) {
     const cmeta_plugin_registry_config config = {2u};
-    const orbit_call_value_contract contract = {
+    orbit_call_value_contract contract = {
         UINT64_C(10), &dso_fault_desc, &dso_fault_desc, 32u, 32u
     };
     cmeta_plugin_registry registry = {0};
@@ -1072,9 +1073,35 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(void) {
     CHECK(orbit_ace_scope_guard_open(
         &n_scope, &runtime, UINT64_C(21), &exact) == ORBIT_ACE_SCOPE_OK);
 
-    /* Original Scope-minted receiver and original Actor/Port; the extra
-     * negative owning contract is test-only and no scalar business call
-     * is dispatched on old N's custom managed Port.
+    if (dso_authored) {
+        /*
+         * M0k.2n: THIS exact DataDesc was defined inside the original
+         * loaded N Provider DSO, not in the host fixture. Recover its
+         * complete CMeta VALUE authority through the original ServiceHost
+         * Scope's ObjectRef. The existing Provider strict-FR0 Interface
+         * and Plugin export remain unchanged.
+         */
+        salts_configurator_service real_provider = {0};
+        CHECK(orbit_ace_scope_guard_find_service(
+            &n_scope, orbit_dso_value_interface(), &real_provider) ==
+              SALTS_SERVICE_HOST_OK);
+        CHECK(real_provider.object != NULL &&
+              real_provider.object->data != NULL);
+        CHECK(cmeta_data_desc_valid(real_provider.object->data));
+        CHECK(real_provider.object->data->kind == CMETA_DATA_STRUCT);
+        CHECK(strcmp(real_provider.object->data->stable_id,
+                     "orbit.test.dso.provider.State") == 0);
+        CHECK(cmeta_data_value_traits_supported(real_provider.object->data));
+        contract.request = real_provider.object->data;
+        contract.response = real_provider.object->data;
+        /* In this mode the host's fault flag is never set. The later
+         * callback error can ONLY come from N's DSO-authored BufferOps.
+         */
+        CHECK(!atomic_load(&dso_fault_final_zero));
+    }
+
+    /* Original Scope-minted receiver and original Actor/Port; no scalar
+     * business call is dispatched on old N's custom managed Port.
      */
     dso_actor_start_with_value(&old_actor, &n_scope, &contract);
     dso_fault_receiver = &old_actor.receiver;
@@ -1087,6 +1114,29 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(void) {
     CHECK(previous == &n.generation);
     CHECK(orbit_ace_scope_guard_open(
         &next_scope, &runtime, UINT64_C(22), &exact) == ORBIT_ACE_SCOPE_OK);
+    if (dso_authored) {
+        salts_configurator_service next_provider = {0};
+        cmeta_data_temp healthy = {0};
+        CHECK(orbit_ace_scope_guard_find_service(
+            &next_scope, orbit_dso_value_interface(), &next_provider) ==
+              SALTS_SERVICE_HOST_OK);
+        CHECK(next_provider.object != NULL &&
+              next_provider.object->data != NULL);
+        CHECK(cmeta_data_desc_valid(next_provider.object->data));
+        /* Both original DSOs publish one semantically identical schema
+         * but distinct module-owned descriptor/function pointer objects.
+         * N+1's own provider has a genuinely healthy no-fail cleanup.
+         */
+        CHECK(next_provider.object->data != contract.request);
+        CHECK(cmeta_data_desc_equal(
+            next_provider.object->data, contract.request));
+        CHECK(cmeta_data_temp_open(
+            next_provider.object->data,
+            next_provider.object->data->storage_type->size,
+            &healthy) == CMETA_OK);
+        CHECK(cmeta_data_temp_try_close(&healthy) == CMETA_OK);
+        CHECK(healthy.storage == NULL);
+    }
     dso_actor_start(&new_actor, &next_scope);
     CHECK(actual_provider_value(&next_scope) == 83);
     CHECK(cmeta_plugin_registry_request_stop(
@@ -1111,11 +1161,20 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(void) {
      * intentionally broken no-fail postcondition. Its original DSO MUST
      * remain live, not be freed by a spurious Port destruction success.
      */
-    atomic_store(&dso_fault_final_zero, true);
+    if (!dso_authored)
+        atomic_store(&dso_fault_final_zero, true);
     CHECK(orbit_call_port_try_destroy(&old_actor.port) ==
           ORBIT_CALL_VALUE_CLEANUP_FAILED);
     CHECK(old_actor.port.impl != NULL);
-    CHECK(atomic_load(&dso_fault_getter_hits) >= 1);
+    if (dso_authored) {
+        /* The host-local fixture is OFF. Only the actual original N DSO
+         * is allowed to make its owning VALUE restore nonzero.
+         */
+        CHECK(!atomic_load(&dso_fault_final_zero));
+        CHECK(atomic_load(&dso_fault_getter_hits) == 0);
+    } else {
+        CHECK(atomic_load(&dso_fault_getter_hits) >= 1);
+    }
     CHECK(orbit_call_port_try_destroy(&old_actor.port) ==
           ORBIT_CALL_VALUE_CLEANUP_FAILED);
     CHECK(orbit_call_port_get_stats(&old_actor.port, &stats));
@@ -1172,7 +1231,12 @@ static void test_dso_quarantined_scope_on_failed_value_cleanup(void) {
 
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--dso-cleanup-quarantine") == 0) {
-        test_dso_quarantined_scope_on_failed_value_cleanup();
+        test_dso_quarantined_scope_on_failed_value_cleanup(false);
+        return 0;
+    }
+    if (argc == 2 &&
+        strcmp(argv[1], "--dso-authored-cleanup-quarantine") == 0) {
+        test_dso_quarantined_scope_on_failed_value_cleanup(true);
         return 0;
     }
     CHECK(argc == 1);
