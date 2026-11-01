@@ -1143,7 +1143,11 @@ static void dso_fault_during_old_managed_borrow(void *user) {
         probe->registry, probe->original) == CMETA_PLUGIN_BUSY);
     CHECK(cmeta_plugin_registry_get_lifecycle(
         probe->registry, probe->original, &lifecycle) == CMETA_PLUGIN_OK);
-    CHECK(lifecycle.active_leases >= 2u);
+    /* The registry pins one original Plugin lease per ServiceHost
+     * generation, NOT one lease per Scope. The independent Scope pins are
+     * accounted by Salts ServiceHost generation.active_scopes instead.
+     */
+    CHECK(lifecycle.active_leases >= 1u);
 
     /* Only the separate Scope A Actor was destroyed; its Port can be
      * checked for faulty final teardown. Scope B's live borrowed Port
