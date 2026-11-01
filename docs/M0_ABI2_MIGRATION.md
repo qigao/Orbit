@@ -1,6 +1,6 @@
 ## CMeta package identity follow-up
 
-This branch builds the exact CMeta source `d6522e311057977221944dd316e6332612c6c6d6` from
+This branch builds the exact CMeta source `c711c378ca450d1261da619980281f4279033cf6` from
 [Salts #1337](https://github.com/qigao/salts/pull/1337), stacked on #1336.
 The GitHub repository remains qigao/salts until its separate manual rename.
 Consumers require `find_package(CMeta CONFIG REQUIRED)` and link CMeta::
@@ -105,3 +105,6 @@ claim of Windows or six-RID release qualification.
 Remote RPC, Streaming, managed-value request/reply, cross-process delivery,
 durable Directory and broader cross-thread race acceptance remain separate.
 No merge, release tag, new consumer project or new CI workflow is introduced.
+
+
+M0k.2l retains the exact CMeta package ABI but uses checked `cmeta_data_temp_try_close` from CMeta Draft #1340 to preserve a failed temporary and original Provider lease instead of incorrectly freeing incomplete cleanup.

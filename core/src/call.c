@@ -64,6 +64,7 @@ typedef struct orbit_call_impl {
     orbit_call_value_contract value_contract; /* one immutable managed method */
     bool value_enabled;
     bool destroying; /* final provider temp_close may reenter */
+    bool cleanup_failed; /* latch permanent no-fail provider violation */
     bool closed;
     orbit_call_terminal close_reason;
     uint64_t admitted;
@@ -636,6 +637,10 @@ orbit_call_status orbit_call_port_try_destroy(orbit_call_port *port) {
      * before this owner-side call; close callbacks/submissions are tracked
      * solely to reject destruction during those known live obligations. */
     cmeta_mutex_lock(&impl->mutex);
+    if (impl->cleanup_failed) {
+        cmeta_mutex_unlock(&impl->mutex);
+        return ORBIT_CALL_VALUE_CLEANUP_FAILED;
+    }
     if (impl->destroying || !impl->closed ||
         impl->owner->actor.impl != NULL ||
         impl->submitting != 0u || impl->executing != 0u ||
@@ -657,8 +662,24 @@ orbit_call_status orbit_call_port_try_destroy(orbit_call_port *port) {
      * Release the retained upstream producer identity ONLY at this boundary.
      */
     for (index = 0u; index < impl->capacity; ++index) {
-        cmeta_data_temp_close(&impl->slots[index].owned_request);
-        cmeta_data_temp_close(&impl->slots[index].owned_response);
+        /*
+         * CMeta's checked close is the ONLY cleanup authority. If a
+         * Provider violates its no-fail restore-to-semantic-zero contract,
+         * DO NOT release a potentially owned value, the saved descriptors
+         * or the original Plugin/Scope owner. An already-closed earlier
+         * temporary remains empty; the violating temp remains allocated.
+         * No retry is permitted by this Port after a contract violation.
+         */
+        if (cmeta_data_temp_try_close(
+                &impl->slots[index].owned_request) != CMETA_OK ||
+            cmeta_data_temp_try_close(
+                &impl->slots[index].owned_response) != CMETA_OK) {
+            cmeta_mutex_lock(&impl->mutex);
+            impl->cleanup_failed = true;
+            impl->destroying = false;
+            cmeta_mutex_unlock(&impl->mutex);
+            return ORBIT_CALL_VALUE_CLEANUP_FAILED;
+        }
     }
     orbit_service_ref_release(&impl->actor_pin);
     cmeta_mutex_destroy(&impl->mutex);

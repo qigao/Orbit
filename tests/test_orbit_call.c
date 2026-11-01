@@ -34,6 +34,10 @@ typedef struct test_owned_bytes {
 } test_owned_bytes;
 
 static atomic_bool test_owned_fail_copy;
+/* Deliberately invalid no-fail Provider used ONLY by a separate invocation
+ * of this existing CTest executable. Its Port must remain quarantined.
+ */
+static atomic_bool test_owned_broken_final_zero;
 
 /* A test-only owning BufferOps provider can reenter the ORIGINAL CallPort
  * from its copy and restore hooks. Hooks are enabled only after the
@@ -69,6 +73,8 @@ static void test_owned_reentry_unexpected_callback(
 
 static bool test_owned_is_zero(const void *object) {
     const test_owned_bytes *v = (const test_owned_bytes *)object;
+    if (atomic_load(&test_owned_broken_final_zero))
+        return false; /* intentionally broken restore postcondition */
     return v && v->data == NULL && v->size == 0u;
 }
 static cmeta_status test_owned_init_zero(void *object) {
@@ -1935,7 +1941,60 @@ static void test_owned_provider_close_during_stage(void) {
     fixture_destroy(&f);
 }
 
-int main(void) {
+/*
+ * M0k.2l: a malformed BufferOps provider claims non-zero after the
+ * no-fail restore callback. The checked CMeta owner must refuse final
+ * storage release; the original Core Port, catalog and any surrounding
+ * ServiceHost Scope must NOT be retired. This negative mode is executed
+ * as another invocation of THIS SAME existing CTest binary, not a new
+ * executable/test project. Its process exits with the quarantined owner
+ * deliberately intact: recovery/retry is not safe for an arbitrary Provider.
+ */
+static void test_bad_restore_quarantines_final_port(void) {
+    call_fixture f;
+    orbit_call_port_stats stats = {0};
+    size_t rounds = 0u;
+
+    fixture_prepare_ex(&f, 2u, 1u, true);
+    orbit_service_ref_release(&f.ref);
+    CHECK(orbit_service_request_stop(&f.service) == CFLOW_ACTOR_OK ||
+          cflow_actor_current_state(&f.service.actor) ==
+              CFLOW_ACTOR_STATE_STOPPED);
+    while (cflow_actor_current_state(&f.service.actor) !=
+               CFLOW_ACTOR_STATE_STOPPED && rounds++ < 2048u)
+        (void)cflow_executor_run_one(&f.executor);
+    CHECK(cflow_actor_current_state(&f.service.actor) ==
+          CFLOW_ACTOR_STATE_STOPPED);
+    CHECK(orbit_service_wait(&f.service) == CFLOW_ACTOR_STATE_STOPPED);
+    orbit_service_destroy(&f.service);
+
+    /* The faulty callback is enabled ONLY during final temp close; there
+     * are no accepted call credits or pending business/callback borrows.
+     */
+    atomic_store(&test_owned_broken_final_zero, true);
+    CHECK(orbit_call_port_try_destroy(&f.calls) ==
+          ORBIT_CALL_VALUE_CLEANUP_FAILED);
+    CHECK(f.calls.impl != NULL); /* the original Port still owns storage */
+    CHECK(orbit_call_port_try_destroy(&f.calls) ==
+          ORBIT_CALL_VALUE_CLEANUP_FAILED); /* no unsafe automatic retry */
+    CHECK(orbit_call_port_get_stats(&f.calls, &stats));
+    CHECK(stats.closed && stats.occupied == 0u);
+    CHECK(stats.executing == 0u && stats.callbacks_inflight == 0u);
+    /* The Port and saved original descriptor/producer lease are intentionally
+     * NOT freed after a Provider no-fail violation. Exit this independent
+     * negative test process rather than fabricating a successful cleanup.
+     */
+    cflow_scheduler_destroy(&f.scheduler);
+    cflow_executor_destroy(&f.executor);
+    cflow_machine_destroy(&f.machine);
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--teardown-quarantine") == 0) {
+        test_bad_restore_quarantines_final_port();
+        return 0;
+    }
+    CHECK(argc == 1);
     test_mailbox_rejection_and_postcommit();
     test_cancel_credit_reuse();
     test_close_and_stale_terminal();
